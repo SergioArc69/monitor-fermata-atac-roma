@@ -187,6 +187,9 @@ DocProject/Help/html
 # Click-Once directory
 publish/
 
+# Compiled installer (attach to GitHub Releases instead of committing)
+installer/output/
+
 # Publish Web Output
 *.[Pp]ublish.xml
 *.azurePubxml

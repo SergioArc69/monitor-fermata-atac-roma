@@ -21,6 +21,7 @@ public sealed class GtfsStaticData
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromDays(7);
 
     private readonly string _cacheFilePath;
+    private readonly string _lastModifiedFilePath;
     private readonly HttpClient _httpClient;
 
     private Dictionary<string, RouteInfo> _routes = new();
@@ -33,6 +34,7 @@ public sealed class GtfsStaticData
         var cacheDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MonitorFermataAtacRoma");
         Directory.CreateDirectory(cacheDir);
         _cacheFilePath = Path.Combine(cacheDir, "rome_static_gtfs.zip");
+        _lastModifiedFilePath = Path.Combine(cacheDir, "rome_static_gtfs.lastmodified");
     }
 
     public async Task LoadAsync(bool forceRefresh = false, CancellationToken ct = default)
@@ -141,11 +143,25 @@ public sealed class GtfsStaticData
 
     private async Task EnsureCachedZipAsync(bool forceRefresh, CancellationToken ct)
     {
-        var isStale = forceRefresh || !File.Exists(_cacheFilePath) ||
-                      DateTime.UtcNow - File.GetLastWriteTimeUtc(_cacheFilePath) > CacheLifetime;
-        if (!isStale) return;
+        var cacheExists = File.Exists(_cacheFilePath);
+        var isExpired = !cacheExists || DateTime.UtcNow - File.GetLastWriteTimeUtc(_cacheFilePath) > CacheLifetime;
+        if (!forceRefresh && !isExpired) return;
 
-        using var response = await _httpClient.GetAsync(StaticFeedUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+        // Ask the server whether the file actually changed before downloading 35+MB again: if the
+        // agency hasn't republished the feed, this costs a near-empty round trip instead of a full
+        // re-download, both on the normal 7-day cache expiry and on a manual "aggiorna" click.
+        using var request = new HttpRequestMessage(HttpMethod.Get, StaticFeedUrl);
+        if (cacheExists && TryReadLastModified() is { } lastModified)
+            request.Headers.IfModifiedSince = lastModified;
+
+        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+
+        if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+        {
+            File.SetLastWriteTimeUtc(_cacheFilePath, DateTime.UtcNow); // reset the freshness clock
+            return;
+        }
+
         response.EnsureSuccessStatusCode();
 
         var tempPath = _cacheFilePath + ".tmp";
@@ -155,6 +171,27 @@ public sealed class GtfsStaticData
             await httpStream.CopyToAsync(fileStream, ct);
         }
         File.Move(tempPath, _cacheFilePath, overwrite: true);
+
+        if (response.Content.Headers.LastModified is { } newLastModified)
+            File.WriteAllText(_lastModifiedFilePath, newLastModified.ToString("R"));
+        else if (File.Exists(_lastModifiedFilePath))
+            File.Delete(_lastModifiedFilePath);
+    }
+
+    private DateTimeOffset? TryReadLastModified()
+    {
+        try
+        {
+            if (File.Exists(_lastModifiedFilePath) &&
+                DateTimeOffset.TryParse(File.ReadAllText(_lastModifiedFilePath), System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var value))
+                return value;
+        }
+        catch (Exception)
+        {
+            // Missing/corrupt metadata just means we fall back to an unconditional request.
+        }
+        return null;
     }
 
     private static Dictionary<string, T> ParseCsvEntry<T>(ZipArchive zip, string entryName, Func<Dictionary<string, string>, (string Key, T Value)?> select)

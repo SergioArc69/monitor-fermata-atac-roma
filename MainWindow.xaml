@@ -7,8 +7,9 @@
         xmlns:wfi="clr-namespace:System.Windows.Forms.Integration;assembly=WindowsFormsIntegration"
         mc:Ignorable="d"
         Icon="Assets/bus.ico"
-        Title="Monitor Fermata ATAC Roma" Height="520" Width="840"
-        Closing="Window_Closing" StateChanged="Window_StateChanged" ResizeMode="CanResizeWithGrip">
+        Title="Monitor Fermata ATAC Roma" Height="500" Width="850"
+        MinWidth="850" MinHeight="300"
+        Closing="Window_Closing" StateChanged="Window_StateChanged" ResizeMode="CanResizeWithGrip" SizeToContent="Height">
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>

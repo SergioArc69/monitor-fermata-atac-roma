@@ -1,8 +1,11 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Data;
+using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Key = System.Windows.Input.Key;
 using MonitorFermataAtacRoma.Models;
@@ -106,6 +109,48 @@ public partial class MainWindow : Window
     private void Window_StateChanged(object? sender, EventArgs e)
     {
         if (WindowState == WindowState.Minimized) Hide();
+    }
+
+    // Window.MinWidth/MinHeight alone are unreliable on some DPI setups (a known WPF issue: the OS
+    // resize limits end up computed from the wrong DPI scale). Enforcing them directly via the native
+    // WM_GETMINMAXINFO message is the standard, DPI-correct workaround.
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        if (PresentationSource.FromVisual(this) is HwndSource hwndSource)
+            hwndSource.AddHook(EnforceMinimumSizeHook);
+    }
+
+    private IntPtr EnforceMinimumSizeHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        const int WM_GETMINMAXINFO = 0x0024;
+        if (msg != WM_GETMINMAXINFO) return IntPtr.Zero;
+
+        var dpiScale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        var minMaxInfo = Marshal.PtrToStructure<MinMaxInfo>(lParam);
+        minMaxInfo.PtMinTrackSize.X = (int)Math.Round(MinWidth * dpiScale);
+        minMaxInfo.PtMinTrackSize.Y = (int)Math.Round(MinHeight * dpiScale);
+        Marshal.StructureToPtr(minMaxInfo, lParam, true);
+
+        handled = true;
+        return IntPtr.Zero;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MinMaxInfo
+    {
+        public NativePoint PtReserved;
+        public NativePoint PtMaxSize;
+        public NativePoint PtMaxPosition;
+        public NativePoint PtMinTrackSize;
+        public NativePoint PtMaxTrackSize;
     }
 
     private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
@@ -403,12 +448,39 @@ public partial class MainWindow : Window
             },
         };
         ArrivalsGrid.ItemsSource = view;
+        RefreshStarColumnWidths();
         StatusTextBlock.Text = arrivals.Count > 0
             ? $"Ultimo aggiornamento: {DateTime.Now:HH:mm:ss} — {arrivals.Count} corse in arrivo."
             : $"Ultimo aggiornamento: {DateTime.Now:HH:mm:ss} — nessuna corsa in arrivo trovata per questa fermata.";
 
         if (NotifyCheckBox.IsChecked == true && arrivals.Count > 0)
             MaybeNotifyNextArrival(arrivals[0]);
+    }
+
+    /// <summary>
+    /// WPF DataGrid quirk: star-sized columns (here "Destinazione") don't redistribute their width
+    /// when ItemsSource is assigned for the first time — only a later layout-invalidating event, like
+    /// resizing the window, does. Toggling the width forces the recomputation.
+    /// </summary>
+    /// <remarks>
+    /// On a restored session at startup, this can run before the window's very first layout pass has
+    /// happened at all (if the GTFS cache is warm, the whole restore chain up to the network call can
+    /// complete synchronously, racing ahead of the queued Render-priority layout). Deferring to
+    /// ContextIdle — lower priority than layout/render — guarantees the DataGrid has been arranged at
+    /// least once before we try to nudge its column widths.
+    /// </remarks>
+    private void RefreshStarColumnWidths()
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            foreach (var column in ArrivalsGrid.Columns)
+            {
+                if (!column.Width.IsStar) continue;
+                var width = column.Width;
+                column.Width = new System.Windows.Controls.DataGridLength(0, System.Windows.Controls.DataGridLengthUnitType.Pixel);
+                column.Width = width;
+            }
+        }), DispatcherPriority.ContextIdle);
     }
 
     private void MaybeNotifyNextArrival(ArrivalInfo next)
