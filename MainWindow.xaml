@@ -1,0 +1,74 @@
+<Window x:Class="MonitorFermataAtacRoma.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:MonitorFermataAtacRoma"
+        mc:Ignorable="d"
+        Icon="Assets/bus.ico"
+        Title="Monitor Fermata ATAC Roma" Height="500" Width="820"
+        Closing="Window_Closing" StateChanged="Window_StateChanged">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,8">
+            <TextBlock Text="Codice fermata:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <TextBox x:Name="StopIdTextBox" Width="120" VerticalContentAlignment="Center"
+                     KeyDown="StopIdTextBox_KeyDown" TextChanged="StopIdTextBox_TextChanged"/>
+            <TextBlock x:Name="StopNameHintTextBlock" VerticalAlignment="Center" Margin="8,0,0,0"
+                       Width="220" FontStyle="Italic" Foreground="Gray" TextTrimming="CharacterEllipsis"/>
+            <Button x:Name="StartButton" Content="Monitora" Margin="8,0,0,0" Padding="12,4" Click="StartButton_Click"/>
+            <Button x:Name="StopButton" Content="Ferma" Margin="8,0,0,0" Padding="12,4" Click="StopButton_Click" IsEnabled="False"/>
+        </StackPanel>
+
+        <StackPanel Orientation="Horizontal" Grid.Row="1" Margin="0,0,0,12">
+            <CheckBox x:Name="AutoStartCheckBox" Content="Avvia con Windows" VerticalAlignment="Center"
+                      Checked="AutoStartCheckBox_Changed" Unchecked="AutoStartCheckBox_Changed"/>
+            <CheckBox x:Name="NotifyCheckBox" Content="Notifica quando mancano meno di 5 minuti"
+                      VerticalAlignment="Center" Margin="20,0,0,0" IsChecked="True"/>
+        </StackPanel>
+
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="150"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Margin="0,0,10,0">
+                <CheckBox x:Name="LineFilterCheckBox" Content="Filtra per linea" Margin="0,0,0,4"
+                          Checked="LineFilterCheckBox_Changed" Unchecked="LineFilterCheckBox_Changed"/>
+                <ListBox x:Name="LineFilterListBox" SelectionMode="Extended"
+                         SelectionChanged="LineFilterListBox_SelectionChanged"/>
+            </StackPanel>
+
+            <DataGrid x:Name="ArrivalsGrid" Grid.Column="1" AutoGenerateColumns="False" IsReadOnly="True"
+                      HeadersVisibility="Column" CanUserAddRows="False" CanUserSortColumns="False"
+                      GridLinesVisibility="Horizontal" RowHeight="32">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Destinazione" Binding="{Binding DestinationLabel}" Width="*"/>
+                    <DataGridTextColumn Header="Arrivo previsto" Binding="{Binding ArrivalTime, StringFormat='HH:mm:ss'}" Width="120"/>
+                    <DataGridTextColumn Header="Tra" Binding="{Binding MinutesLabel}" Width="90"/>
+                    <DataGridTextColumn Header="Stato" Binding="{Binding DelayLabel}" Width="100"/>
+                </DataGrid.Columns>
+                <DataGrid.GroupStyle>
+                    <GroupStyle>
+                        <GroupStyle.HeaderTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding Name, StringFormat='Linea {0}'}" FontWeight="Bold"
+                                           Background="#FFEDEDED" Padding="6,3" Margin="0,4,0,0"/>
+                            </DataTemplate>
+                        </GroupStyle.HeaderTemplate>
+                    </GroupStyle>
+                </DataGrid.GroupStyle>
+            </DataGrid>
+        </Grid>
+
+        <TextBlock x:Name="StatusTextBlock" Grid.Row="3" Margin="0,10,0,0" Foreground="Gray"
+                   Text="Inserisci un codice fermata e premi Monitora."/>
+    </Grid>
+</Window>
