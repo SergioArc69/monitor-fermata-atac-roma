@@ -14,22 +14,28 @@ namespace MonitorFermataAtacRoma;
 
 public partial class MainWindow : Window
 {
-    private const string DefaultStopId = "73953"; // BONA
+    private const int MaxNameSearchResults = 50;
 
     private static readonly TimeSpan RefreshInterval = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan NotifyThreshold = TimeSpan.FromMinutes(5);
 
     private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(20) };
     private readonly GtfsStaticData _staticData;
     private readonly GtfsRealtimeService _realtimeService;
+    private readonly RecentStopsService _recentStops = new();
+    private readonly SettingsService _settingsService = new();
     private readonly DispatcherTimer _timer;
     private readonly Task _staticDataLoadTask;
     private readonly Forms.NotifyIcon _notifyIcon;
     private readonly ObservableCollection<string> _availableLines = new();
 
+    private readonly Forms.NumericUpDown _notifyMinutesUpDown = new() { Minimum = 1, Maximum = 60, Value = 5 };
+    private readonly Forms.DateTimePicker _notifyFromPicker = CreateTimePicker();
+    private readonly Forms.DateTimePicker _notifyToPicker = CreateTimePicker();
+
     private string? _monitoredStopId;
     private string? _lastNotifiedKey;
     private IReadOnlyList<ArrivalInfo> _lastArrivals = Array.Empty<ArrivalInfo>();
+    private List<string>? _pendingLineSelection;
     private bool _isExiting;
 
     public MainWindow()
@@ -44,13 +50,28 @@ public partial class MainWindow : Window
 
         _notifyIcon = CreateNotifyIcon();
 
+        NotifyMinutesHost.Child = _notifyMinutesUpDown;
+        NotifyFromHost.Child = _notifyFromPicker;
+        NotifyToHost.Child = _notifyToPicker;
+        _notifyFromPicker.Value = DateTime.Today;
+        _notifyToPicker.Value = DateTime.Today.AddHours(23).AddMinutes(59);
+
         LineFilterListBox.ItemsSource = _availableLines;
 
-        AutoStartCheckBox.IsChecked = AutoStartService.IsEnabled();
+        StopIdComboBox.AddHandler(
+            System.Windows.Controls.Primitives.TextBoxBase.TextChangedEvent,
+            new System.Windows.Controls.TextChangedEventHandler(StopIdComboBox_TextChanged));
 
         _staticDataLoadTask = LoadStaticDataAsync();
-        StopIdTextBox.Text = DefaultStopId;
+        _ = RestoreLastSessionAsync();
     }
+
+    private static Forms.DateTimePicker CreateTimePicker() => new()
+    {
+        Format = Forms.DateTimePickerFormat.Custom,
+        CustomFormat = "HH:mm",
+        ShowUpDown = true,
+    };
 
     private Forms.NotifyIcon CreateNotifyIcon()
     {
@@ -60,7 +81,7 @@ public partial class MainWindow : Window
 
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("Apri", null, (_, _) => ShowFromTray());
-        menu.Items.Add("Esci", null, (_, _) => { _isExiting = true; System.Windows.Application.Current.Shutdown(); });
+        menu.Items.Add("Esci", null, (_, _) => ExitApplication());
 
         var notifyIcon = new Forms.NotifyIcon
         {
@@ -99,14 +120,59 @@ public partial class MainWindow : Window
             "L'app continua a girare nella system tray. Usa il menu dell'icona per uscire.", Forms.ToolTipIcon.Info);
     }
 
+    private void ExitButton_Click(object sender, RoutedEventArgs e) => ExitApplication();
+
+    private void ExitApplication()
+    {
+        SaveCurrentSession();
+        _isExiting = true;
+        System.Windows.Application.Current.Shutdown();
+    }
+
+    private void SaveCurrentSession()
+    {
+        _settingsService.Save(new AppSettings
+        {
+            WasMonitoring = _monitoredStopId is not null,
+            StopId = _monitoredStopId ?? StopIdComboBox.Text.Trim(),
+            NotifyEnabled = NotifyCheckBox.IsChecked == true,
+            NotifyMinutes = (int)_notifyMinutesUpDown.Value,
+            NotifyFrom = _notifyFromPicker.Value.ToString("HH:mm"),
+            NotifyTo = _notifyToPicker.Value.ToString("HH:mm"),
+            LineFilterEnabled = LineFilterCheckBox.IsChecked == true,
+            SelectedLines = LineFilterListBox.SelectedItems.Cast<string>().ToList(),
+        });
+    }
+
+    private async Task RestoreLastSessionAsync()
+    {
+        await _staticDataLoadTask;
+
+        var settings = _settingsService.Load();
+        if (!settings.WasMonitoring || string.IsNullOrWhiteSpace(settings.StopId)) return;
+
+        NotifyCheckBox.IsChecked = settings.NotifyEnabled;
+        _notifyMinutesUpDown.Value = Math.Clamp(settings.NotifyMinutes, (int)_notifyMinutesUpDown.Minimum, (int)_notifyMinutesUpDown.Maximum);
+        if (DateTime.TryParseExact(settings.NotifyFrom, "HH:mm", null, System.Globalization.DateTimeStyles.None, out var from))
+            _notifyFromPicker.Value = from;
+        if (DateTime.TryParseExact(settings.NotifyTo, "HH:mm", null, System.Globalization.DateTimeStyles.None, out var to))
+            _notifyToPicker.Value = to;
+        LineFilterCheckBox.IsChecked = settings.LineFilterEnabled;
+        _pendingLineSelection = settings.SelectedLines;
+
+        StopIdComboBox.Text = settings.StopId;
+        await StartMonitoringAsync();
+    }
+
     private async Task LoadStaticDataAsync()
     {
         StatusTextBlock.Text = "Scaricamento dati GTFS statici (linee/fermate)...";
         try
         {
             await _staticData.LoadAsync();
-            StatusTextBlock.Text = "Dati caricati. Inserisci un codice fermata e premi Monitora.";
+            StatusTextBlock.Text = "Dati caricati. Digita il nome o il codice di una fermata e premi Monitora.";
             UpdateStopNameHint();
+            UpdateSuggestions();
         }
         catch (Exception ex)
         {
@@ -125,19 +191,46 @@ public partial class MainWindow : Window
         _availableLines.Clear();
         StartButton.IsEnabled = true;
         StopButton.IsEnabled = false;
-        StopIdTextBox.IsEnabled = true;
+        StopIdComboBox.IsEnabled = true;
         StatusTextBlock.Text = "Monitoraggio fermato.";
     }
 
-    private async void StopIdTextBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    private async void StopIdComboBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
         if (e.Key == Key.Enter) await StartMonitoringAsync();
     }
 
-    private void StopIdTextBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => UpdateStopNameHint();
+    private void StopIdComboBox_GotFocus(object sender, RoutedEventArgs e) => UpdateSuggestions();
 
-    private void AutoStartCheckBox_Changed(object sender, RoutedEventArgs e) =>
-        AutoStartService.SetEnabled(AutoStartCheckBox.IsChecked == true);
+    private void StopIdComboBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
+        UpdateStopNameHint();
+        UpdateSuggestions();
+    }
+
+    private void StopIdComboBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (StopIdComboBox.SelectedItem is not StopSuggestion suggestion) return;
+
+        // WPF syncs Text from SelectedItem right after this handler returns, which would
+        // overwrite whatever we set here (e.g. back to the item's ToString()). Deferring to
+        // the next dispatcher cycle lets our assignment win.
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            StopIdComboBox.IsDropDownOpen = false;
+            StopIdComboBox.Text = suggestion.StopId;
+        }), DispatcherPriority.ContextIdle);
+    }
+
+    private void SettingsButton_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new SettingsWindow(_staticData) { Owner = this };
+        dialog.ShowDialog();
+
+        // Names/routes may have just been refreshed from the dialog.
+        UpdateStopNameHint();
+        UpdateSuggestions();
+    }
 
     private void LineFilterCheckBox_Changed(object sender, RoutedEventArgs e) => ApplyFilterAndDisplay();
 
@@ -145,7 +238,7 @@ public partial class MainWindow : Window
 
     private void UpdateStopNameHint()
     {
-        var stopId = StopIdTextBox.Text.Trim();
+        var stopId = StopIdComboBox.Text.Trim();
         if (stopId.Length == 0)
         {
             StopNameHintTextBlock.Text = "";
@@ -160,24 +253,62 @@ public partial class MainWindow : Window
         }
         else
         {
-            StopNameHintTextBlock.Text = "(fermata non trovata)";
+            StopNameHintTextBlock.Text = "";
         }
     }
 
+    /// <summary>Refreshes the dropdown: MRU when the field is empty or numeric, name search otherwise.</summary>
+    private void UpdateSuggestions()
+    {
+        var text = StopIdComboBox.Text.Trim();
+        List<StopSuggestion> items;
+
+        if (text.Length == 0)
+        {
+            items = BuildRecentSuggestions();
+        }
+        else if (text.All(char.IsDigit))
+        {
+            items = BuildRecentSuggestions().Where(s => s.StopId.StartsWith(text, StringComparison.Ordinal)).ToList();
+        }
+        else if (_staticDataLoadTask.IsCompleted)
+        {
+            items = _staticData.SearchStopsByName(text, MaxNameSearchResults).ToList();
+        }
+        else
+        {
+            items = new List<StopSuggestion>();
+        }
+
+        StopIdComboBox.ItemsSource = items;
+        StopIdComboBox.IsDropDownOpen = items.Count > 0 && StopIdComboBox.IsKeyboardFocusWithin;
+    }
+
+    private List<StopSuggestion> BuildRecentSuggestions() =>
+        _recentStops.StopIds
+            .Select(id => new StopSuggestion(id, _staticData.TryGetStopName(id, out var name) ? name : ""))
+            .ToList();
+
     private async Task StartMonitoringAsync()
     {
-        var stopId = StopIdTextBox.Text.Trim();
+        var stopId = StopIdComboBox.Text.Trim();
         if (stopId.Length == 0)
         {
             StatusTextBlock.Text = "Inserisci un codice fermata valido.";
             return;
         }
+        if (!stopId.All(char.IsDigit))
+        {
+            StatusTextBlock.Text = "Il codice fermata deve essere numerico: seleziona una fermata dai suggerimenti oppure digita il codice.";
+            return;
+        }
 
         StartButton.IsEnabled = false;
-        StopIdTextBox.IsEnabled = false;
+        StopIdComboBox.IsEnabled = false;
         _monitoredStopId = stopId;
         _lastNotifiedKey = null;
         _availableLines.Clear();
+        _recentStops.Touch(stopId);
 
         if (!_staticDataLoadTask.IsCompleted)
             StatusTextBlock.Text = "Attendo il caricamento dei dati GTFS statici...";
@@ -204,12 +335,25 @@ public partial class MainWindow : Window
             foreach (var line in _lastArrivals.Select(a => a.RouteLabel).Distinct())
                 AddAvailableLine(line);
 
+            ApplyPendingLineSelection();
             ApplyFilterAndDisplay();
         }
         catch (Exception ex)
         {
             StatusTextBlock.Text = $"Errore durante l'aggiornamento ({DateTime.Now:HH:mm:ss}): {ex.Message}";
         }
+    }
+
+    /// <summary>Re-selects the line filter saved from the previous session, once its lines show up in the feed.</summary>
+    private void ApplyPendingLineSelection()
+    {
+        if (_pendingLineSelection is null) return;
+
+        foreach (var line in _pendingLineSelection)
+            if (_availableLines.Contains(line) && !LineFilterListBox.SelectedItems.Contains(line))
+                LineFilterListBox.SelectedItems.Add(line);
+
+        _pendingLineSelection = null;
     }
 
     private void AddAvailableLine(string label)
@@ -250,7 +394,9 @@ public partial class MainWindow : Window
 
     private void MaybeNotifyNextArrival(ArrivalInfo next)
     {
-        if (next.TimeUntilArrival <= TimeSpan.Zero || next.TimeUntilArrival > NotifyThreshold) return;
+        var notifyThreshold = TimeSpan.FromMinutes((double)_notifyMinutesUpDown.Value);
+        if (next.TimeUntilArrival <= TimeSpan.Zero || next.TimeUntilArrival > notifyThreshold) return;
+        if (!IsWithinNotifyWindow()) return;
 
         // Bucketing on the estimated time (rounded down to the previous even minute) means small
         // second-to-second prediction jitter doesn't re-trigger a notification, but a real change
@@ -269,5 +415,16 @@ public partial class MainWindow : Window
     {
         var evenMinute = time.Minute - (time.Minute % 2);
         return new DateTime(time.Year, time.Month, time.Day, time.Hour, evenMinute, 0);
+    }
+
+    private bool IsWithinNotifyWindow()
+    {
+        var from = _notifyFromPicker.Value.TimeOfDay;
+        var to = _notifyToPicker.Value.TimeOfDay;
+        var now = DateTime.Now.TimeOfDay;
+
+        return from <= to
+            ? now >= from && now <= to
+            : now >= from || now <= to; // overnight range, e.g. 22:00-06:00
     }
 }

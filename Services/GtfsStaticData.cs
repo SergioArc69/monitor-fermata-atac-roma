@@ -1,6 +1,7 @@
 using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
+using MonitorFermataAtacRoma.Models;
 
 namespace MonitorFermataAtacRoma.Services;
 
@@ -33,9 +34,9 @@ public sealed class GtfsStaticData
         _cacheFilePath = Path.Combine(cacheDir, "rome_static_gtfs.zip");
     }
 
-    public async Task LoadAsync(CancellationToken ct = default)
+    public async Task LoadAsync(bool forceRefresh = false, CancellationToken ct = default)
     {
-        await EnsureCachedZipAsync(ct);
+        await EnsureCachedZipAsync(forceRefresh, ct);
 
         using var zip = ZipFile.OpenRead(_cacheFilePath);
 
@@ -54,6 +55,18 @@ public sealed class GtfsStaticData
 
     public bool TryGetStopName(string stopId, out string stopName) => _stopNames.TryGetValue(stopId, out stopName!);
 
+    public IReadOnlyList<StopSuggestion> SearchStopsByName(string query, int maxResults)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return Array.Empty<StopSuggestion>();
+
+        return _stopNames
+            .Where(kv => kv.Value.Contains(query, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(kv => kv.Value, StringComparer.OrdinalIgnoreCase)
+            .Take(maxResults)
+            .Select(kv => new StopSuggestion(kv.Key, kv.Value))
+            .ToList();
+    }
+
     public (string RouteLabel, string Headsign) DescribeTrip(string tripId, string fallbackRouteId)
     {
         if (_trips.TryGetValue(tripId, out var trip))
@@ -70,9 +83,9 @@ public sealed class GtfsStaticData
             ? (string.IsNullOrEmpty(route.ShortName) ? route.LongName : route.ShortName)
             : routeId;
 
-    private async Task EnsureCachedZipAsync(CancellationToken ct)
+    private async Task EnsureCachedZipAsync(bool forceRefresh, CancellationToken ct)
     {
-        var isStale = !File.Exists(_cacheFilePath) ||
+        var isStale = forceRefresh || !File.Exists(_cacheFilePath) ||
                       DateTime.UtcNow - File.GetLastWriteTimeUtc(_cacheFilePath) > CacheLifetime;
         if (!isStale) return;
 

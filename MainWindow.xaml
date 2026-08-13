@@ -4,6 +4,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:MonitorFermataAtacRoma"
+        xmlns:wfi="clr-namespace:System.Windows.Forms.Integration;assembly=WindowsFormsIntegration"
         mc:Ignorable="d"
         Icon="Assets/bus.ico"
         Title="Monitor Fermata ATAC Roma" Height="500" Width="820"
@@ -17,20 +18,42 @@
         </Grid.RowDefinitions>
 
         <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,8">
-            <TextBlock Text="Codice fermata:" VerticalAlignment="Center" Margin="0,0,8,0"/>
-            <TextBox x:Name="StopIdTextBox" Width="120" VerticalContentAlignment="Center"
-                     KeyDown="StopIdTextBox_KeyDown" TextChanged="StopIdTextBox_TextChanged"/>
+            <TextBlock Text="Fermata:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <ComboBox x:Name="StopIdComboBox" Width="280" IsEditable="True" IsTextSearchEnabled="False"
+                      StaysOpenOnEdit="True" VerticalContentAlignment="Center"
+                      KeyDown="StopIdComboBox_KeyDown" GotFocus="StopIdComboBox_GotFocus"
+                      SelectionChanged="StopIdComboBox_SelectionChanged">
+                <ComboBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock>
+                            <TextBlock.Text>
+                                <MultiBinding StringFormat="{}{0} — {1}">
+                                    <Binding Path="StopId"/>
+                                    <Binding Path="StopName"/>
+                                </MultiBinding>
+                            </TextBlock.Text>
+                        </TextBlock>
+                    </DataTemplate>
+                </ComboBox.ItemTemplate>
+            </ComboBox>
             <TextBlock x:Name="StopNameHintTextBlock" VerticalAlignment="Center" Margin="8,0,0,0"
                        Width="220" FontStyle="Italic" Foreground="Gray" TextTrimming="CharacterEllipsis"/>
             <Button x:Name="StartButton" Content="Monitora" Margin="8,0,0,0" Padding="12,4" Click="StartButton_Click"/>
             <Button x:Name="StopButton" Content="Ferma" Margin="8,0,0,0" Padding="12,4" Click="StopButton_Click" IsEnabled="False"/>
+            <Button x:Name="ExitButton" Content="Esci" Margin="8,0,0,0" Padding="12,4" Click="ExitButton_Click"/>
         </StackPanel>
 
         <StackPanel Orientation="Horizontal" Grid.Row="1" Margin="0,0,0,12">
-            <CheckBox x:Name="AutoStartCheckBox" Content="Avvia con Windows" VerticalAlignment="Center"
-                      Checked="AutoStartCheckBox_Changed" Unchecked="AutoStartCheckBox_Changed"/>
-            <CheckBox x:Name="NotifyCheckBox" Content="Notifica quando mancano meno di 5 minuti"
-                      VerticalAlignment="Center" Margin="20,0,0,0" IsChecked="True"/>
+            <Button x:Name="SettingsButton" Content="Impostazioni" Padding="10,4" VerticalAlignment="Center"
+                    Click="SettingsButton_Click"/>
+            <CheckBox x:Name="NotifyCheckBox" Content="Notifica quando mancano meno di"
+                      VerticalAlignment="Center" Margin="20,0,4,0" IsChecked="True"/>
+            <wfi:WindowsFormsHost x:Name="NotifyMinutesHost" Width="50" Height="22" VerticalAlignment="Center"/>
+            <TextBlock Text="minuti" VerticalAlignment="Center" Margin="4,0,0,0"/>
+            <TextBlock Text="tra le" VerticalAlignment="Center" Margin="16,0,4,0"/>
+            <wfi:WindowsFormsHost x:Name="NotifyFromHost" Width="66" Height="22" VerticalAlignment="Center"/>
+            <TextBlock Text="e le" VerticalAlignment="Center" Margin="8,0,4,0"/>
+            <wfi:WindowsFormsHost x:Name="NotifyToHost" Width="66" Height="22" VerticalAlignment="Center"/>
         </StackPanel>
 
         <Grid Grid.Row="2">
