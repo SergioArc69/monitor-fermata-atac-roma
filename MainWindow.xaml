@@ -7,8 +7,8 @@
         xmlns:wfi="clr-namespace:System.Windows.Forms.Integration;assembly=WindowsFormsIntegration"
         mc:Ignorable="d"
         Icon="Assets/bus.ico"
-        Title="Monitor Fermata ATAC Roma" Height="500" Width="820"
-        Closing="Window_Closing" StateChanged="Window_StateChanged">
+        Title="Monitor Fermata ATAC Roma" Height="520" Width="840"
+        Closing="Window_Closing" StateChanged="Window_StateChanged" ResizeMode="CanResizeWithGrip">
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -18,6 +18,8 @@
         </Grid.RowDefinitions>
 
         <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,8">
+            <Button x:Name="MapButton" Content="🗺" FontSize="14" Padding="8,4" Margin="0,0,8,0"
+                    ToolTip="Mostra mappa" Click="MapButton_Click"/>
             <TextBlock Text="Fermata:" VerticalAlignment="Center" Margin="0,0,8,0"/>
             <ComboBox x:Name="StopIdComboBox" Width="280" IsEditable="True" IsTextSearchEnabled="False"
                       StaysOpenOnEdit="True" VerticalContentAlignment="Center"

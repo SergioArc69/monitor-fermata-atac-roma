@@ -7,6 +7,7 @@ namespace MonitorFermataAtacRoma.Services;
 
 public sealed record RouteInfo(string ShortName, string LongName);
 public sealed record TripInfo(string RouteId, string Headsign);
+public sealed record StopInfo(string Name, double Lat, double Lon);
 
 /// <summary>
 /// Loads and caches the static GTFS feed (routes/trips/stops) just to translate
@@ -24,7 +25,7 @@ public sealed class GtfsStaticData
 
     private Dictionary<string, RouteInfo> _routes = new();
     private Dictionary<string, TripInfo> _trips = new();
-    private Dictionary<string, string> _stopNames = new();
+    private Dictionary<string, StopInfo> _stops = new();
 
     public GtfsStaticData(HttpClient httpClient)
     {
@@ -48,24 +49,79 @@ public sealed class GtfsStaticData
             ? (id, new TripInfo(fields.GetValueOrDefault("route_id", ""), fields.GetValueOrDefault("trip_headsign", "")))
             : null);
 
-        _stopNames = ParseCsvEntry<string>(zip, "stops.txt", fields => fields.TryGetValue("stop_id", out var id)
-            ? (id, fields.GetValueOrDefault("stop_name", ""))
+        _stops = ParseCsvEntry<StopInfo>(zip, "stops.txt", fields => fields.TryGetValue("stop_id", out var id)
+            ? (id, new StopInfo(
+                fields.GetValueOrDefault("stop_name", ""),
+                ParseCoordinate(fields.GetValueOrDefault("stop_lat", "")),
+                ParseCoordinate(fields.GetValueOrDefault("stop_lon", ""))))
             : null);
     }
 
-    public bool TryGetStopName(string stopId, out string stopName) => _stopNames.TryGetValue(stopId, out stopName!);
+    public bool TryGetStopName(string stopId, out string stopName)
+    {
+        if (_stops.TryGetValue(stopId, out var stop))
+        {
+            stopName = stop.Name;
+            return true;
+        }
+        stopName = "";
+        return false;
+    }
+
+    public bool TryGetStopLocation(string stopId, out double lat, out double lon)
+    {
+        if (_stops.TryGetValue(stopId, out var stop) && (stop.Lat != 0 || stop.Lon != 0))
+        {
+            lat = stop.Lat;
+            lon = stop.Lon;
+            return true;
+        }
+        lat = 0;
+        lon = 0;
+        return false;
+    }
 
     public IReadOnlyList<StopSuggestion> SearchStopsByName(string query, int maxResults)
     {
         if (string.IsNullOrWhiteSpace(query)) return Array.Empty<StopSuggestion>();
 
-        return _stopNames
-            .Where(kv => kv.Value.Contains(query, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(kv => kv.Value, StringComparer.OrdinalIgnoreCase)
+        return _stops
+            .Where(kv => kv.Value.Name.Contains(query, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(kv => kv.Value.Name, StringComparer.OrdinalIgnoreCase)
             .Take(maxResults)
-            .Select(kv => new StopSuggestion(kv.Key, kv.Value))
+            .Select(kv => new StopSuggestion(kv.Key, kv.Value.Name))
             .ToList();
     }
+
+    public IReadOnlyList<NearbyStop> GetNearbyStops(double lat, double lon, int maxResults)
+    {
+        return _stops
+            .Where(kv => kv.Value.Lat != 0 || kv.Value.Lon != 0)
+            .Select(kv => new NearbyStop(kv.Key, kv.Value.Name, kv.Value.Lat, kv.Value.Lon,
+                HaversineMeters(lat, lon, kv.Value.Lat, kv.Value.Lon)))
+            .OrderBy(s => s.DistanceMeters)
+            .Take(maxResults)
+            .ToList();
+    }
+
+    private static double ParseCoordinate(string value) =>
+        double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var result)
+            ? result
+            : 0;
+
+    private static double HaversineMeters(double lat1, double lon1, double lat2, double lon2)
+    {
+        const double earthRadiusMeters = 6371000;
+        var dLat = DegreesToRadians(lat2 - lat1);
+        var dLon = DegreesToRadians(lon2 - lon1);
+        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+                Math.Cos(DegreesToRadians(lat1)) * Math.Cos(DegreesToRadians(lat2)) *
+                Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
+        var c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+        return earthRadiusMeters * c;
+    }
+
+    private static double DegreesToRadians(double degrees) => degrees * Math.PI / 180.0;
 
     public (string RouteLabel, string Headsign) DescribeTrip(string tripId, string fallbackRouteId)
     {

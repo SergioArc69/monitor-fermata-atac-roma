@@ -21,6 +21,7 @@ public partial class MainWindow : Window
     private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(20) };
     private readonly GtfsStaticData _staticData;
     private readonly GtfsRealtimeService _realtimeService;
+    private readonly VehiclePositionsService _vehiclePositionsService;
     private readonly RecentStopsService _recentStops = new();
     private readonly SettingsService _settingsService = new();
     private readonly DispatcherTimer _timer;
@@ -44,6 +45,7 @@ public partial class MainWindow : Window
 
         _staticData = new GtfsStaticData(_httpClient);
         _realtimeService = new GtfsRealtimeService(_httpClient, _staticData);
+        _vehiclePositionsService = new VehiclePositionsService(_httpClient);
 
         _timer = new DispatcherTimer { Interval = RefreshInterval };
         _timer.Tick += async (_, _) => await RefreshArrivalsAsync();
@@ -220,6 +222,23 @@ public partial class MainWindow : Window
             StopIdComboBox.IsDropDownOpen = false;
             StopIdComboBox.Text = suggestion.StopId;
         }), DispatcherPriority.ContextIdle);
+    }
+
+    private async void MapButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_staticDataLoadTask.IsCompleted)
+        {
+            StatusTextBlock.Text = "Attendo il caricamento dei dati GTFS statici prima di aprire la mappa...";
+            await _staticDataLoadTask;
+        }
+
+        var dialog = _monitoredStopId is not null
+            ? new MapWindow(_staticData, _realtimeService, _vehiclePositionsService, _monitoredStopId)
+            : new MapWindow(_staticData, null, null, null);
+        dialog.Owner = this;
+
+        if (dialog.ShowDialog() == true && dialog.SelectedStopId is not null)
+            StopIdComboBox.Text = dialog.SelectedStopId;
     }
 
     private void SettingsButton_Click(object sender, RoutedEventArgs e)
