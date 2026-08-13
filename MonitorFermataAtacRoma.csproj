@@ -21,7 +21,7 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" GeneratePathProperty="true" />
   </ItemGroup>
 
   <ItemGroup>
@@ -31,5 +31,27 @@
   <ItemGroup>
     <Resource Include="Assets\bus.ico" />
   </ItemGroup>
+
+  <!--
+    WebView2Loader.dll is a native library loaded by the WebView2 SDK's own loader logic, which
+    expects it as a real file next to the exe. PublishSingleFile would otherwise bundle it into the
+    exe like any other native runtime asset, and WebView2 then fails to find it at startup (crashes
+    the app, since EnsureCoreWebView2Async throws from an async void handler). Reference it directly
+    as a loose, excluded-from-bundle content file instead.
+  -->
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' AND Exists('$(PkgMicrosoft_Web_WebView2)\runtimes\win-x64\native\WebView2Loader.dll')">
+    <None Include="$(PkgMicrosoft_Web_WebView2)\runtimes\win-x64\native\WebView2Loader.dll">
+      <Link>WebView2Loader.dll</Link>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </None>
+  </ItemGroup>
+
+  <!-- CopyToPublishDirectory metadata alone isn't reliably honored for this native asset under
+       PublishSingleFile, so guarantee the loose file lands next to the exe with an explicit copy. -->
+  <Target Name="CopyWebView2LoaderAfterPublish" AfterTargets="Publish"
+          Condition="'$(RuntimeIdentifier)' == 'win-x64' AND Exists('$(PkgMicrosoft_Web_WebView2)\runtimes\win-x64\native\WebView2Loader.dll')">
+    <Copy SourceFiles="$(PkgMicrosoft_Web_WebView2)\runtimes\win-x64\native\WebView2Loader.dll"
+          DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

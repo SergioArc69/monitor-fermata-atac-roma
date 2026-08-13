@@ -8,9 +8,13 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $installerDir = $PSScriptRoot
 $publishDir = Join-Path $root "publish"
+$csproj = Join-Path $root "MonitorFermataAtacRoma.csproj"
 
 Write-Host "==> Publishing self-contained single-file build..." -ForegroundColor Cyan
-dotnet publish "$root" -c Release -r win-x64 --self-contained true `
+# Target the .csproj explicitly: dotnet publish on the folder picks up the .slnx solution file
+# instead, which silently drops project-level publish customizations (like the WebView2Loader.dll
+# copy below the [Files] section relies on).
+dotnet publish "$csproj" -c Release -r win-x64 --self-contained true `
   -p:PublishSingleFile=true `
   -p:IncludeNativeLibrariesForSelfExtract=true `
   -p:EnableCompressionInSingleFile=true `

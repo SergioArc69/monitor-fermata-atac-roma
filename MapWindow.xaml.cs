@@ -1,6 +1,8 @@
 using System.Globalization;
+using System.IO;
 using System.Windows;
 using System.Windows.Threading;
+using Microsoft.Web.WebView2.Core;
 using MonitorFermataAtacRoma.Services;
 using Geo = Windows.Devices.Geolocation;
 
@@ -49,34 +51,53 @@ public partial class MapWindow : Window
 
     private async void MapWindow_Loaded(object sender, RoutedEventArgs e)
     {
-        await MapWebView.EnsureCoreWebView2Async();
-        MapWebView.CoreWebView2.WebMessageReceived += (_, args) =>
+        // async void: any unhandled exception here would crash the whole app, not just this dialog
+        // (this is exactly how a missing WebView2Loader.dll took the app down). Never let that happen.
+        try
         {
-            SelectedStopId = args.TryGetWebMessageAsString();
-            DialogResult = true;
-        };
+            // WebView2 defaults to a user data folder next to the exe. When installed under
+            // Program Files, a non-admin user can't write there (E_ACCESSDENIED) — point it at
+            // %LOCALAPPDATA% instead, alongside the app's other cached data.
+            var userDataFolder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "MonitorFermataAtacRoma", "WebView2");
+            var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
+            await MapWebView.EnsureCoreWebView2Async(environment);
+            MapWebView.CoreWebView2.WebMessageReceived += (_, args) =>
+            {
+                SelectedStopId = args.TryGetWebMessageAsString();
+                DialogResult = true;
+            };
 
-        var navigationCompleted = new TaskCompletionSource();
-        void OnNavigationCompleted(object? s, Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs a) =>
-            navigationCompleted.TrySetResult();
-        MapWebView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
-        MapWebView.NavigateToString(MapHtml);
-        await navigationCompleted.Task;
-        MapWebView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
+            var navigationCompleted = new TaskCompletionSource();
+            void OnNavigationCompleted(object? s, Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs a) =>
+                navigationCompleted.TrySetResult();
+            MapWebView.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
+            MapWebView.NavigateToString(MapHtml);
+            await navigationCompleted.Task;
+            MapWebView.CoreWebView2.NavigationCompleted -= OnNavigationCompleted;
 
-        if (_monitoredStopId is not null && _staticData.TryGetStopLocation(_monitoredStopId, out var lat, out var lon))
-        {
-            _staticData.TryGetStopName(_monitoredStopId, out var stopName);
-            InstructionTextBlock.Text = "Fermata monitorata, con la posizione dei bus in transito (aggiornata ogni 15 secondi).";
+            if (_monitoredStopId is not null && _staticData.TryGetStopLocation(_monitoredStopId, out var lat, out var lon))
+            {
+                _staticData.TryGetStopName(_monitoredStopId, out var stopName);
+                InstructionTextBlock.Text = "Fermata monitorata, con la posizione dei bus in transito (aggiornata ogni 15 secondi).";
 
-            await ExecuteScriptAsync($"initMap({Fmt(lat)}, {Fmt(lon)}, 16);");
-            await ExecuteScriptAsync($"addStopMarker('{_monitoredStopId}', {Fmt(lat)}, {Fmt(lon)}, {JsString(stopName)}, false);");
-            await RefreshBusPositionsAsync();
-            _busRefreshTimer?.Start();
+                await ExecuteScriptAsync($"initMap({Fmt(lat)}, {Fmt(lon)}, 16);");
+                await ExecuteScriptAsync($"addStopMarker('{_monitoredStopId}', {Fmt(lat)}, {Fmt(lon)}, {JsString(stopName)}, false);");
+                await RefreshBusPositionsAsync();
+                _busRefreshTimer?.Start();
+            }
+            else
+            {
+                await ShowNearbyStopsAsync();
+            }
         }
-        else
+        catch (Exception ex)
         {
-            await ShowNearbyStopsAsync();
+            InstructionTextBlock.Text =
+                "Impossibile caricare la mappa: verifica che Microsoft Edge WebView2 Runtime sia installato " +
+                "(https://developer.microsoft.com/microsoft-edge/webview2/).\n" +
+                $"Dettaglio: {ex.Message}";
         }
     }
 
