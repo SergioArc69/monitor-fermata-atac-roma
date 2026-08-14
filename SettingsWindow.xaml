@@ -5,7 +5,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         mc:Ignorable="d"
         Icon="Assets/bus.ico"
-        Title="Impostazioni" Height="220" Width="420"
+        Title="Impostazioni" Height="250" Width="420"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         ShowInTaskbar="False">
     <StackPanel Margin="16">
@@ -16,7 +16,11 @@
                 HorizontalAlignment="Left" Padding="10,6" Click="RefreshDataButton_Click"/>
         <TextBlock x:Name="StatusTextBlock" Margin="0,8,0,0" Foreground="Gray" TextWrapping="Wrap"/>
 
-        <Button x:Name="CloseButton" Content="Chiudi" HorizontalAlignment="Right"
-                Margin="0,24,0,0" Padding="16,6" Click="CloseButton_Click"/>
+        <Grid Margin="0,24,0,0">
+            <Button x:Name="AboutButton" Content="Informazioni" HorizontalAlignment="Left"
+                    Padding="16,6" Click="AboutButton_Click"/>
+            <Button x:Name="CloseButton" Content="Chiudi" HorizontalAlignment="Right"
+                    Padding="16,6" Click="CloseButton_Click"/>
+        </Grid>
     </StackPanel>
 </Window>

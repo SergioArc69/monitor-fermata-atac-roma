@@ -37,4 +37,7 @@ public partial class SettingsWindow : Window
     }
 
     private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
+
+    private void AboutButton_Click(object sender, RoutedEventArgs e) =>
+        new AboutWindow { Owner = this }.ShowDialog();
 }

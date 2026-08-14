@@ -14,10 +14,13 @@ App desktop per Windows che mostra in tempo reale gli orari di arrivo degli auto
 
 ### Installazione
 
-Scarica `MonitorFermataAtacRoma-Setup-1.0.0.exe` qui sotto ed eseguilo. L'installer:
+Scarica `MonitorFermataAtacRoma-Setup-1.0.0.exe` qui sotto ed eseguilo.
+L'installer:
 - non richiede prerequisiti aggiuntivi (l'app è self-contained, include il runtime .NET)
 - richiede **Microsoft Edge WebView2 Runtime** per la funzione mappa — quasi sempre già presente su Windows 10/11 aggiornati; se mancante, l'installer te lo segnala con il link per scaricarlo
 
 ### Fonte dati
 
-[Open data GTFS/GTFS-RT di Roma Mobilità](https://romamobilita.it/it/tecnologie/open-data/dataset) — nessuna API key richiesta.
+[Open data GTFS/GTFS-RT di Roma Mobilità](https://romamobilita.it/it/tecnologie/open-data/dataset) — nessuna API key richiesta. I dati di fermate e linee vengono aggiornati periodicamente in locale; gli orari di arrivo e le posizioni dei bus sono sempre in tempo reale.
+
+La mappa usa le tile di [OpenStreetMap](https://www.openstreetmap.org/copyright), © collaboratori di OpenStreetMap, distribuite con licenza [ODbL](https://opendatacommons.org/licenses/odbl/).
