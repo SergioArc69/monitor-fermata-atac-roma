@@ -22,23 +22,28 @@
             <Button x:Name="MapButton" Content="🗺" FontSize="14" Padding="8,4" Margin="0,0,8,0"
                     ToolTip="Mostra mappa" Click="MapButton_Click"/>
             <TextBlock Text="Fermata:" VerticalAlignment="Center" Margin="0,0,8,0"/>
-            <ComboBox x:Name="StopIdComboBox" Width="280" IsEditable="True" IsTextSearchEnabled="False"
-                      StaysOpenOnEdit="True" VerticalContentAlignment="Center"
-                      KeyDown="StopIdComboBox_KeyDown" GotFocus="StopIdComboBox_GotFocus"
-                      SelectionChanged="StopIdComboBox_SelectionChanged">
-                <ComboBox.ItemTemplate>
-                    <DataTemplate>
-                        <TextBlock>
-                            <TextBlock.Text>
-                                <MultiBinding StringFormat="{}{0} — {1}">
-                                    <Binding Path="StopId"/>
-                                    <Binding Path="StopName"/>
-                                </MultiBinding>
-                            </TextBlock.Text>
-                        </TextBlock>
-                    </DataTemplate>
-                </ComboBox.ItemTemplate>
-            </ComboBox>
+            <Grid Width="280">
+                <ComboBox x:Name="StopIdComboBox" IsEditable="True" IsTextSearchEnabled="False"
+                          StaysOpenOnEdit="True" VerticalContentAlignment="Center"
+                          KeyDown="StopIdComboBox_KeyDown" GotFocus="StopIdComboBox_GotFocus"
+                          SelectionChanged="StopIdComboBox_SelectionChanged">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock>
+                                <TextBlock.Text>
+                                    <MultiBinding StringFormat="{}{0} — {1}">
+                                        <Binding Path="StopId"/>
+                                        <Binding Path="StopName"/>
+                                    </MultiBinding>
+                                </TextBlock.Text>
+                            </TextBlock>
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+                <TextBlock x:Name="StopIdPlaceholderText" Text="Cerca fermata/linea"
+                           IsHitTestVisible="False" Foreground="Gray"
+                           Margin="7,0,0,0" VerticalAlignment="Center"/>
+            </Grid>
             <TextBlock x:Name="StopNameHintTextBlock" VerticalAlignment="Center" Margin="8,0,0,0"
                        Width="220" FontStyle="Italic" Foreground="Gray" TextTrimming="CharacterEllipsis"/>
             <Button x:Name="StartButton" Content="Monitora" Margin="8,0,0,0" Padding="12,4" Click="StartButton_Click"/>

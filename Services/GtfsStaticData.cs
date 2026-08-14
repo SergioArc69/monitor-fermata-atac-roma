@@ -5,15 +5,16 @@ using MonitorFermataAtacRoma.Models;
 
 namespace MonitorFermataAtacRoma.Services;
 
-public sealed record RouteInfo(string ShortName, string LongName);
-public sealed record TripInfo(string RouteId, string Headsign);
+public sealed record RouteInfo(string ShortName, string LongName, int RouteType);
+public sealed record TripInfo(string RouteId, string Headsign, string ServiceId);
 public sealed record StopInfo(string Name, double Lat, double Lon);
 
 /// <summary>
 /// Loads and caches the static GTFS feed (routes/trips/stops) just to translate
 /// the bare ids coming from GTFS-RT into human-readable line names and stop names.
-/// stop_times.txt (huge, >150MB for Rome) is intentionally never parsed: GTFS-RT
-/// already carries per-trip stop time updates, so it isn't needed.
+/// stop_times.txt (huge, >150MB for Rome) is never fully loaded into memory: it's only streamed
+/// on demand, and just for one stop at a time, as a scheduled-times fallback when GTFS-RT has
+/// nothing to report (see <see cref="GetScheduledArrivals"/>).
 /// </summary>
 public sealed class GtfsStaticData
 {
@@ -27,6 +28,21 @@ public sealed class GtfsStaticData
     private Dictionary<string, RouteInfo> _routes = new();
     private Dictionary<string, TripInfo> _trips = new();
     private Dictionary<string, StopInfo> _stops = new();
+    private HashSet<(string ServiceId, int Date)> _activeServiceDates = new();
+    private Dictionary<string, HashSet<int>> _stopRouteTypes = new();
+    private Dictionary<string, List<StopSuggestion>> _routeStops = new(StringComparer.OrdinalIgnoreCase);
+
+    private static readonly Dictionary<int, string> RouteTypeNames = new()
+    {
+        [0] = "Tram",
+        [1] = "Metro",
+        [2] = "Treno",
+        [3] = "Bus",
+        [4] = "Traghetto",
+        [5] = "Tram a fune",
+        [6] = "Funivia",
+        [7] = "Funicolare",
+    };
 
     public GtfsStaticData(HttpClient httpClient)
     {
@@ -44,11 +60,17 @@ public sealed class GtfsStaticData
         using var zip = ZipFile.OpenRead(_cacheFilePath);
 
         _routes = ParseCsvEntry<RouteInfo>(zip, "routes.txt", fields => fields.TryGetValue("route_id", out var id)
-            ? (id, new RouteInfo(fields.GetValueOrDefault("route_short_name", ""), fields.GetValueOrDefault("route_long_name", "")))
+            ? (id, new RouteInfo(
+                fields.GetValueOrDefault("route_short_name", ""),
+                fields.GetValueOrDefault("route_long_name", ""),
+                int.TryParse(fields.GetValueOrDefault("route_type", ""), out var routeType) ? routeType : -1))
             : null);
 
         _trips = ParseCsvEntry<TripInfo>(zip, "trips.txt", fields => fields.TryGetValue("trip_id", out var id)
-            ? (id, new TripInfo(fields.GetValueOrDefault("route_id", ""), fields.GetValueOrDefault("trip_headsign", "")))
+            ? (id, new TripInfo(
+                fields.GetValueOrDefault("route_id", ""),
+                fields.GetValueOrDefault("trip_headsign", ""),
+                fields.GetValueOrDefault("service_id", "")))
             : null);
 
         _stops = ParseCsvEntry<StopInfo>(zip, "stops.txt", fields => fields.TryGetValue("stop_id", out var id)
@@ -57,7 +79,102 @@ public sealed class GtfsStaticData
                 ParseCoordinate(fields.GetValueOrDefault("stop_lat", "")),
                 ParseCoordinate(fields.GetValueOrDefault("stop_lon", ""))))
             : null);
+
+        _activeServiceDates = ParseActiveServiceDates(zip);
+        // Stale after a refresh; rebuilt by BuildStopIndexes.
+        _stopRouteTypes = new Dictionary<string, HashSet<int>>();
+        _routeStops = new Dictionary<string, List<StopSuggestion>>(StringComparer.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Scans stop_times.txt once to learn, for every stop, which transport modes serve it
+    /// (bus/metro/tram/...) and, for every line, which stops it visits (in route order) — two small
+    /// aggregated indexes built from a single pass, rather than keeping the whole file loaded. Meant to
+    /// be kicked off in the background: it's a multi-second full scan, and optional — <see cref="TryGetStopModes"/>
+    /// and <see cref="GetStopsForRoute"/> simply return nothing until this has completed.
+    /// </summary>
+    public void BuildStopIndexes()
+    {
+        if (!File.Exists(_cacheFilePath)) return;
+
+        using var zip = ZipFile.OpenRead(_cacheFilePath);
+        var entry = zip.GetEntry("stop_times.txt");
+        if (entry is null) return;
+
+        using var reader = new StreamReader(entry.Open());
+        var headerLine = reader.ReadLine();
+        if (headerLine is null) return;
+
+        var headers = ParseCsvLine(headerLine);
+        var tripIdx = headers.IndexOf("trip_id");
+        var stopIdx = headers.IndexOf("stop_id");
+        var seqIdx = headers.IndexOf("stop_sequence");
+        if (tripIdx < 0 || stopIdx < 0) return;
+
+        var modesIndex = new Dictionary<string, HashSet<int>>();
+        // routeLabel -> stopId -> lowest stop_sequence seen, so the final list roughly follows the
+        // physical order of the route instead of being alphabetical.
+        var routeStopSequence = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
+
+        while (reader.ReadLine() is { } line)
+        {
+            var fields = ParseCsvLine(line);
+            var maxIdx = Math.Max(tripIdx, stopIdx);
+            if (fields.Count <= maxIdx) continue;
+
+            if (!_trips.TryGetValue(fields[tripIdx], out var trip)) continue;
+            if (!_routes.TryGetValue(trip.RouteId, out var route) || route.RouteType < 0) continue;
+
+            var stopId = fields[stopIdx];
+
+            if (!modesIndex.TryGetValue(stopId, out var types))
+            {
+                types = new HashSet<int>();
+                modesIndex[stopId] = types;
+            }
+            types.Add(route.RouteType);
+
+            var routeLabel = ResolveRouteLabel(trip.RouteId);
+            if (!routeStopSequence.TryGetValue(routeLabel, out var stopsForRoute))
+            {
+                stopsForRoute = new Dictionary<string, int>();
+                routeStopSequence[routeLabel] = stopsForRoute;
+            }
+
+            var sequence = seqIdx >= 0 && fields.Count > seqIdx && int.TryParse(fields[seqIdx], out var seq) ? seq : int.MaxValue;
+            if (!stopsForRoute.TryGetValue(stopId, out var existingSequence) || sequence < existingSequence)
+                stopsForRoute[stopId] = sequence;
+        }
+
+        _stopRouteTypes = modesIndex;
+        _routeStops = new Dictionary<string, List<StopSuggestion>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (routeLabel, stopsForRoute) in routeStopSequence)
+        {
+            _routeStops[routeLabel] = stopsForRoute
+                .OrderBy(kv => kv.Value)
+                .Select(kv => new StopSuggestion(kv.Key, _stops.TryGetValue(kv.Key, out var stop) ? stop.Name : ""))
+                .ToList();
+        }
+    }
+
+    /// <summary>Human-readable transport mode(s) for a stop (e.g. "Bus", "Metro/Bus"), once <see cref="BuildStopIndexes"/> has run.</summary>
+    public bool TryGetStopModes(string stopId, out string modesLabel)
+    {
+        if (_stopRouteTypes.TryGetValue(stopId, out var types) && types.Count > 0)
+        {
+            modesLabel = string.Join("/", types
+                .OrderBy(t => t)
+                .Select(t => RouteTypeNames.GetValueOrDefault(t, "Altro"))
+                .Distinct());
+            return true;
+        }
+        modesLabel = "";
+        return false;
+    }
+
+    /// <summary>The stops served by a line (route order), once <see cref="BuildStopIndexes"/> has run. Empty if the line is unknown or the index isn't ready yet.</summary>
+    public IReadOnlyList<StopSuggestion> GetStopsForRoute(string routeLabel) =>
+        _routeStops.TryGetValue(routeLabel, out var stops) ? stops : Array.Empty<StopSuggestion>();
 
     public bool TryGetStopName(string stopId, out string stopName)
     {
@@ -83,12 +200,25 @@ public sealed class GtfsStaticData
         return false;
     }
 
-    public IReadOnlyList<StopSuggestion> SearchStopsByName(string query, int maxResults)
+    /// <summary>
+    /// Matches the query against both the stop code and the stop name: codes aren't always numeric
+    /// (e.g. metro/rail interchanges like "BP16" for Tiburtina FS), so a name-only search would miss them.
+    /// </summary>
+    /// <summary>
+    /// An exact (case-insensitive) match against a known line number takes priority and returns that
+    /// line's stops in route order — e.g. typing "53" lists every stop line 53 serves. Otherwise falls
+    /// back to the regular code-or-name substring search.
+    /// </summary>
+    public IReadOnlyList<StopSuggestion> SearchStops(string query, int maxResults)
     {
         if (string.IsNullOrWhiteSpace(query)) return Array.Empty<StopSuggestion>();
 
+        if (_routeStops.TryGetValue(query, out var routeStops) && routeStops.Count > 0)
+            return routeStops.Take(maxResults).ToList();
+
         return _stops
-            .Where(kv => kv.Value.Name.Contains(query, StringComparison.OrdinalIgnoreCase))
+            .Where(kv => kv.Key.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                         kv.Value.Name.Contains(query, StringComparison.OrdinalIgnoreCase))
             .OrderBy(kv => kv.Value.Name, StringComparer.OrdinalIgnoreCase)
             .Take(maxResults)
             .Select(kv => new StopSuggestion(kv.Key, kv.Value.Name))
@@ -160,6 +290,105 @@ public sealed class GtfsStaticData
         _routes.TryGetValue(routeId, out var route)
             ? (string.IsNullOrEmpty(route.ShortName) ? route.LongName : route.ShortName)
             : routeId;
+
+    /// <summary>
+    /// Falls back to the static timetable when GTFS-RT has nothing to say for this stop (e.g. quiet
+    /// periods, or gaps in realtime coverage). Streams stop_times.txt (150+MB) directly from the cached
+    /// zip rather than keeping it indexed in memory, since this only runs occasionally and on-demand for
+    /// a single stop — a full scan takes a couple of seconds, which is fine for a rare fallback.
+    /// </summary>
+    public IReadOnlyList<ScheduledArrival> GetScheduledArrivals(string stopId, int maxResults)
+    {
+        var now = DateTime.Now;
+        var today = DateOnly.FromDateTime(now);
+        var todayKey = today.Year * 10000 + today.Month * 100 + today.Day;
+
+        if (!File.Exists(_cacheFilePath)) return Array.Empty<ScheduledArrival>();
+
+        using var zip = ZipFile.OpenRead(_cacheFilePath);
+        var entry = zip.GetEntry("stop_times.txt");
+        if (entry is null) return Array.Empty<ScheduledArrival>();
+
+        using var reader = new StreamReader(entry.Open());
+        var headerLine = reader.ReadLine();
+        if (headerLine is null) return Array.Empty<ScheduledArrival>();
+
+        var headers = ParseCsvLine(headerLine);
+        var tripIdx = headers.IndexOf("trip_id");
+        var stopIdx = headers.IndexOf("stop_id");
+        var arrivalIdx = headers.IndexOf("arrival_time");
+        if (tripIdx < 0 || stopIdx < 0 || arrivalIdx < 0) return Array.Empty<ScheduledArrival>();
+
+        var results = new List<ScheduledArrival>();
+
+        while (reader.ReadLine() is { } line)
+        {
+            // Cheap pre-check before paying for a full CSV split: most rows are for other stops.
+            if (!line.Contains(stopId, StringComparison.Ordinal)) continue;
+
+            var fields = ParseCsvLine(line);
+            var maxIdx = Math.Max(tripIdx, Math.Max(stopIdx, arrivalIdx));
+            if (fields.Count <= maxIdx || fields[stopIdx] != stopId) continue;
+
+            var tripId = fields[tripIdx];
+            if (!_trips.TryGetValue(tripId, out var trip)) continue;
+            if (!_activeServiceDates.Contains((trip.ServiceId, todayKey))) continue;
+
+            if (!TryParseGtfsTimeOfDay(fields[arrivalIdx], out var timeOfDay)) continue;
+            var arrivalTime = now.Date.Add(timeOfDay); // GTFS allows hours >= 24 for past-midnight trips
+            if (arrivalTime < now.AddMinutes(-1)) continue;
+
+            var (routeLabel, headsign) = DescribeTrip(tripId, trip.RouteId);
+            results.Add(new ScheduledArrival(tripId, routeLabel, headsign, arrivalTime));
+        }
+
+        return results.OrderBy(r => r.ArrivalTime).Take(maxResults).ToList();
+    }
+
+    private static bool TryParseGtfsTimeOfDay(string value, out TimeSpan timeOfDay)
+    {
+        timeOfDay = TimeSpan.Zero;
+        var parts = value.Split(':');
+        if (parts.Length != 3) return false;
+        if (!int.TryParse(parts[0], out var h) || !int.TryParse(parts[1], out var m) || !int.TryParse(parts[2], out var s))
+            return false;
+        timeOfDay = new TimeSpan(h, m, s);
+        return true;
+    }
+
+    private static HashSet<(string ServiceId, int Date)> ParseActiveServiceDates(ZipArchive zip)
+    {
+        var result = new HashSet<(string, int)>();
+        var entry = zip.GetEntry("calendar_dates.txt");
+        if (entry is null) return result;
+
+        using var reader = new StreamReader(entry.Open());
+        var headerLine = reader.ReadLine();
+        if (headerLine is null) return result;
+
+        var headers = ParseCsvLine(headerLine);
+        var serviceIdx = headers.IndexOf("service_id");
+        var dateIdx = headers.IndexOf("date");
+        var exceptionIdx = headers.IndexOf("exception_type");
+        if (serviceIdx < 0 || dateIdx < 0) return result;
+
+        while (reader.ReadLine() is { } line)
+        {
+            if (line.Length == 0) continue;
+            var fields = ParseCsvLine(line);
+            var maxIdx = Math.Max(serviceIdx, dateIdx);
+            if (fields.Count <= maxIdx) continue;
+
+            // exception_type: 1 = service added on this date, 2 = removed. Rome's feed only ever adds
+            // (there's no base calendar.txt weekly pattern to subtract from), but honor it if present.
+            if (exceptionIdx >= 0 && fields.Count > exceptionIdx && fields[exceptionIdx] == "2") continue;
+            if (!int.TryParse(fields[dateIdx], out var date)) continue;
+
+            result.Add((fields[serviceIdx], date));
+        }
+
+        return result;
+    }
 
     private async Task EnsureCachedZipAsync(bool forceRefresh, CancellationToken ct)
     {

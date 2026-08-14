@@ -25,6 +25,7 @@ public partial class SettingsWindow : Window
         {
             await _staticData.LoadAsync(forceRefresh: true);
             StatusTextBlock.Text = "Dati aggiornati.";
+            _ = Task.Run(_staticData.BuildStopIndexes); // rebuild in background; stale until it completes
         }
         catch (Exception ex)
         {

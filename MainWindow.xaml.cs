@@ -36,11 +36,17 @@ public partial class MainWindow : Window
     private readonly Forms.DateTimePicker _notifyFromPicker = CreateTimePicker();
     private readonly Forms.DateTimePicker _notifyToPicker = CreateTimePicker();
 
+    private static readonly TimeSpan ScheduledFallbackCacheLifetime = TimeSpan.FromMinutes(3);
+
     private string? _monitoredStopId;
     private string? _lastNotifiedKey;
     private IReadOnlyList<ArrivalInfo> _lastArrivals = Array.Empty<ArrivalInfo>();
     private List<string>? _pendingLineSelection;
     private bool _isExiting;
+
+    private string? _scheduledFallbackStopId;
+    private IReadOnlyList<ArrivalInfo> _scheduledFallback = Array.Empty<ArrivalInfo>();
+    private DateTime _scheduledFallbackFetchedAt = DateTime.MinValue;
 
     public MainWindow()
     {
@@ -220,6 +226,13 @@ public partial class MainWindow : Window
             StatusTextBlock.Text = "Dati caricati. Digita il nome o il codice di una fermata e premi Monitora.";
             UpdateStopNameHint();
             UpdateSuggestions();
+
+            // Background, best-effort: a multi-second full scan to learn each stop's transport
+            // mode (bus/metro/tram/...), used by the map tooltips and the stop name hint. Nothing
+            // waits on this — refresh the hint once it's done in case the user is still looking at
+            // the same stop, but the map/hint work fine without it in the meantime.
+            _ = Task.Run(_staticData.BuildStopIndexes).ContinueWith(
+                _ => UpdateStopNameHint(), TaskScheduler.FromCurrentSynchronizationContext());
         }
         catch (Exception ex)
         {
@@ -251,6 +264,7 @@ public partial class MainWindow : Window
 
     private void StopIdComboBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
     {
+        StopIdPlaceholderText.Visibility = StopIdComboBox.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         UpdateStopNameHint();
         UpdateSuggestions();
     }
@@ -313,7 +327,9 @@ public partial class MainWindow : Window
         }
         else if (_staticData.TryGetStopName(stopId, out var stopName))
         {
-            StopNameHintTextBlock.Text = stopName;
+            StopNameHintTextBlock.Text = _staticData.TryGetStopModes(stopId, out var modes)
+                ? $"{stopName} · {modes}"
+                : stopName;
         }
         else
         {
@@ -321,7 +337,7 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>Refreshes the dropdown: MRU when the field is empty or numeric, name search otherwise.</summary>
+    /// <summary>Refreshes the dropdown: MRU when the field is empty, code-or-name search otherwise.</summary>
     private void UpdateSuggestions()
     {
         var text = StopIdComboBox.Text.Trim();
@@ -331,13 +347,9 @@ public partial class MainWindow : Window
         {
             items = BuildRecentSuggestions();
         }
-        else if (text.All(char.IsDigit))
-        {
-            items = BuildRecentSuggestions().Where(s => s.StopId.StartsWith(text, StringComparison.Ordinal)).ToList();
-        }
         else if (_staticDataLoadTask.IsCompleted)
         {
-            items = _staticData.SearchStopsByName(text, MaxNameSearchResults).ToList();
+            items = _staticData.SearchStops(text, MaxNameSearchResults).ToList();
         }
         else
         {
@@ -359,11 +371,6 @@ public partial class MainWindow : Window
         if (stopId.Length == 0)
         {
             StatusTextBlock.Text = "Inserisci un codice fermata valido.";
-            return;
-        }
-        if (!stopId.All(char.IsDigit))
-        {
-            StatusTextBlock.Text = "Il codice fermata deve essere numerico: seleziona una fermata dai suggerimenti oppure digita il codice.";
             return;
         }
 
@@ -396,6 +403,10 @@ public partial class MainWindow : Window
         {
             _lastArrivals = await _realtimeService.GetArrivalsForStopAsync(_monitoredStopId);
 
+            _lastArrivals = _lastArrivals.Count == 0
+                ? await GetScheduledFallbackAsync(_monitoredStopId)
+                : await SupplementSparseLinesAsync(_monitoredStopId, _lastArrivals);
+
             foreach (var line in _lastArrivals.Select(a => a.RouteLabel).Distinct())
                 AddAvailableLine(line);
 
@@ -406,6 +417,62 @@ public partial class MainWindow : Window
         {
             StatusTextBlock.Text = $"Errore durante l'aggiornamento ({DateTime.Now:HH:mm:ss}): {ex.Message}";
         }
+    }
+
+    /// <summary>
+    /// When a line only has a single realtime arrival, the rider can't yet tell if buses on that line
+    /// are still frequent or about to thin out — pad it with the next couple of scheduled (non-live)
+    /// arrivals for the same line, clearly marked as such via IsRealtime=false.
+    /// </summary>
+    private async Task<IReadOnlyList<ArrivalInfo>> SupplementSparseLinesAsync(string stopId, IReadOnlyList<ArrivalInfo> realtimeArrivals)
+    {
+        var sparseLines = realtimeArrivals
+            .GroupBy(a => a.RouteLabel)
+            .Where(g => g.Count() == 1)
+            .Select(g => g.Key)
+            .ToHashSet();
+        if (sparseLines.Count == 0) return realtimeArrivals;
+
+        var scheduled = await GetScheduledFallbackAsync(stopId);
+        if (scheduled.Count == 0) return realtimeArrivals;
+
+        var existingTripIds = realtimeArrivals.Select(a => a.TripId).ToHashSet();
+        var supplement = scheduled
+            .Where(s => sparseLines.Contains(s.RouteLabel) && !existingTripIds.Contains(s.TripId))
+            .GroupBy(s => s.RouteLabel)
+            .SelectMany(g => g.OrderBy(s => s.ArrivalTime).Take(2));
+
+        return realtimeArrivals.Concat(supplement).OrderBy(a => a.ArrivalTime).ToList();
+    }
+
+    /// <summary>
+    /// GTFS-RT sometimes has nothing for a stop (quiet periods, feed gaps). Falls back to the static
+    /// timetable — a real but non-live schedule — instead of a bare "nessuna corsa". Also reused to pad
+    /// sparse lines (see <see cref="SupplementSparseLinesAsync"/>). Cached briefly per stop since the
+    /// underlying scan is a multi-second file read, not something to repeat every 30s.
+    /// </summary>
+    private async Task<IReadOnlyList<ArrivalInfo>> GetScheduledFallbackAsync(string stopId)
+    {
+        if (_scheduledFallbackStopId == stopId && DateTime.Now - _scheduledFallbackFetchedAt < ScheduledFallbackCacheLifetime)
+            return _scheduledFallback;
+
+        // Not filtered by line here (the static scan doesn't know yet which lines will need padding),
+        // so cast a wide enough net across all of the stop's lines.
+        var scheduled = await Task.Run(() => _staticData.GetScheduledArrivals(stopId, 150));
+
+        _scheduledFallback = scheduled.Select(s => new ArrivalInfo
+        {
+            TripId = s.TripId,
+            RouteLabel = s.RouteLabel,
+            Headsign = s.Headsign,
+            ArrivalTime = s.ArrivalTime,
+            DelaySeconds = 0,
+            IsRealtime = false,
+        }).ToList();
+        _scheduledFallbackStopId = stopId;
+        _scheduledFallbackFetchedAt = DateTime.Now;
+
+        return _scheduledFallback;
     }
 
     /// <summary>Re-selects the line filter saved from the previous session, once its lines show up in the feed.</summary>
@@ -449,11 +516,19 @@ public partial class MainWindow : Window
         };
         ArrivalsGrid.ItemsSource = view;
         RefreshStarColumnWidths();
-        StatusTextBlock.Text = arrivals.Count > 0
-            ? $"Ultimo aggiornamento: {DateTime.Now:HH:mm:ss} — {arrivals.Count} corse in arrivo."
-            : $"Ultimo aggiornamento: {DateTime.Now:HH:mm:ss} — nessuna corsa in arrivo trovata per questa fermata.";
 
-        if (NotifyCheckBox.IsChecked == true && arrivals.Count > 0)
+        var scheduledCount = arrivals.Count(a => !a.IsRealtime);
+        StatusTextBlock.Text = (arrivals.Count, scheduledCount) switch
+        {
+            (0, _) => $"Ultimo aggiornamento: {DateTime.Now:HH:mm:ss} — nessuna corsa in arrivo trovata per questa fermata.",
+            (var total, var sched) when sched == total => $"Ultimo aggiornamento: {DateTime.Now:HH:mm:ss} — nessun dato in tempo reale, mostro {total} corse dall'orario schedulato.",
+            (var total, > 0) => $"Ultimo aggiornamento: {DateTime.Now:HH:mm:ss} — {total} corse in arrivo ({scheduledCount} dall'orario schedulato).",
+            (var total, _) => $"Ultimo aggiornamento: {DateTime.Now:HH:mm:ss} — {total} corse in arrivo.",
+        };
+
+        // The static timetable doesn't reflect real delays, so it's not a reliable enough basis for
+        // an "arriving in N minutes" push notification — only notify from live GTFS-RT data.
+        if (NotifyCheckBox.IsChecked == true && arrivals.Count > 0 && arrivals[0].IsRealtime)
             MaybeNotifyNextArrival(arrivals[0]);
     }
 

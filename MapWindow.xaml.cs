@@ -80,7 +80,7 @@ public partial class MapWindow : Window
                 InstructionTextBlock.Text = "Fermata monitorata, con la posizione dei bus in transito (aggiornata ogni 15 secondi).";
 
                 await ExecuteScriptAsync($"initMap({Fmt(lat)}, {Fmt(lon)}, 16);");
-                await ExecuteScriptAsync($"addStopMarker('{_monitoredStopId}', {Fmt(lat)}, {Fmt(lon)}, {JsString(stopName)}, false);");
+                await ExecuteScriptAsync($"addStopMarker('{_monitoredStopId}', {Fmt(lat)}, {Fmt(lon)}, {JsString(BuildStopTooltip(_monitoredStopId, stopName))}, false);");
                 await RefreshBusPositionsAsync();
                 _busRefreshTimer?.Start();
             }
@@ -121,7 +121,16 @@ public partial class MapWindow : Window
         await ExecuteScriptAsync("clearStopMarkers();");
         foreach (var stop in _staticData.GetStopsInBounds(north, south, east, west, MaxVisibleStops))
             await ExecuteScriptAsync(
-                $"addStopMarker('{stop.StopId}', {Fmt(stop.Lat)}, {Fmt(stop.Lon)}, {JsString(stop.StopName)}, true);");
+                $"addStopMarker('{stop.StopId}', {Fmt(stop.Lat)}, {Fmt(stop.Lon)}, {JsString(BuildStopTooltip(stop.StopId, stop.StopName))}, true);");
+    }
+
+    /// <summary>"&lt;b&gt;code&lt;/b&gt; — name" plus the transport mode(s) on a second line, once known.</summary>
+    private string BuildStopTooltip(string stopId, string stopName)
+    {
+        var tooltip = $"<b>{System.Net.WebUtility.HtmlEncode(stopId)}</b> — {System.Net.WebUtility.HtmlEncode(stopName)}";
+        if (_staticData.TryGetStopModes(stopId, out var modes))
+            tooltip += $"<br><i>{System.Net.WebUtility.HtmlEncode(modes)}</i>";
+        return tooltip;
     }
 
     private async Task OnWebMessageReceivedAsync(CoreWebView2WebMessageReceivedEventArgs args)
