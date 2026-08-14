@@ -106,6 +106,26 @@ public sealed class GtfsStaticData
             .ToList();
     }
 
+    /// <summary>
+    /// All stops within the given map viewport, capped at <paramref name="maxResults"/> (closest to the
+    /// viewport center first) so zooming out over a wide area doesn't dump thousands of markers on the map.
+    /// </summary>
+    public IReadOnlyList<NearbyStop> GetStopsInBounds(double north, double south, double east, double west, int maxResults)
+    {
+        var centerLat = (north + south) / 2;
+        var centerLon = (east + west) / 2;
+
+        return _stops
+            .Where(kv => (kv.Value.Lat != 0 || kv.Value.Lon != 0) &&
+                         kv.Value.Lat <= north && kv.Value.Lat >= south &&
+                         kv.Value.Lon <= east && kv.Value.Lon >= west)
+            .Select(kv => new NearbyStop(kv.Key, kv.Value.Name, kv.Value.Lat, kv.Value.Lon,
+                HaversineMeters(centerLat, centerLon, kv.Value.Lat, kv.Value.Lon)))
+            .OrderBy(s => s.DistanceMeters)
+            .Take(maxResults)
+            .ToList();
+    }
+
     private static double ParseCoordinate(string value) =>
         double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var result)
             ? result

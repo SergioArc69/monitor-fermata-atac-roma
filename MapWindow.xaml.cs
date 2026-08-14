@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
@@ -63,11 +64,7 @@ public partial class MapWindow : Window
                 "MonitorFermataAtacRoma", "WebView2");
             var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: userDataFolder);
             await MapWebView.EnsureCoreWebView2Async(environment);
-            MapWebView.CoreWebView2.WebMessageReceived += (_, args) =>
-            {
-                SelectedStopId = args.TryGetWebMessageAsString();
-                DialogResult = true;
-            };
+            MapWebView.CoreWebView2.WebMessageReceived += async (_, args) => await OnWebMessageReceivedAsync(args);
 
             var navigationCompleted = new TaskCompletionSource();
             void OnNavigationCompleted(object? s, Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs a) =>
@@ -107,15 +104,56 @@ public partial class MapWindow : Window
         var (lat, lon) = location ?? (41.9028, 12.4964); // fallback: Roma centro
 
         InstructionTextBlock.Text = location is not null
-            ? "Fermate vicino alla tua posizione: clicca su una fermata per selezionarla."
-            : "Posizione non disponibile: mostro le fermate del centro di Roma. Clicca su una fermata per selezionarla.";
+            ? "Fermate vicino alla tua posizione: clicca su una fermata per selezionarla, oppure sposta o zooma la mappa per cercarne altre."
+            : "Posizione non disponibile: mostro le fermate del centro di Roma. Clicca su una fermata per selezionarla, oppure sposta o zooma la mappa per cercarne altre.";
 
         await ExecuteScriptAsync($"initMap({Fmt(lat)}, {Fmt(lon)}, 16);");
         await ExecuteScriptAsync($"addMeMarker({Fmt(lat)}, {Fmt(lon)});");
+        await ExecuteScriptAsync("enableViewportStopSearch();");
+        await ExecuteScriptAsync("notifyViewportChanged();"); // triggers the first stop search, via the same path as pan/zoom
+    }
 
-        foreach (var stop in _staticData.GetNearbyStops(lat, lon, 40))
+    private const int MaxVisibleStops = 150;
+
+    /// <summary>Replaces the selectable stop markers with the ones inside the current map viewport.</summary>
+    private async Task RefreshStopsInViewportAsync(double north, double south, double east, double west)
+    {
+        await ExecuteScriptAsync("clearStopMarkers();");
+        foreach (var stop in _staticData.GetStopsInBounds(north, south, east, west, MaxVisibleStops))
             await ExecuteScriptAsync(
                 $"addStopMarker('{stop.StopId}', {Fmt(stop.Lat)}, {Fmt(stop.Lon)}, {JsString(stop.StopName)}, true);");
+    }
+
+    private async Task OnWebMessageReceivedAsync(CoreWebView2WebMessageReceivedEventArgs args)
+    {
+        try
+        {
+            var json = args.TryGetWebMessageAsString();
+            if (json is null) return;
+
+            using var message = JsonDocument.Parse(json);
+            var type = message.RootElement.GetProperty("type").GetString();
+
+            switch (type)
+            {
+                case "select":
+                    SelectedStopId = message.RootElement.GetProperty("stopId").GetString();
+                    DialogResult = true;
+                    break;
+
+                case "viewportChanged":
+                    var north = message.RootElement.GetProperty("north").GetDouble();
+                    var south = message.RootElement.GetProperty("south").GetDouble();
+                    var east = message.RootElement.GetProperty("east").GetDouble();
+                    var west = message.RootElement.GetProperty("west").GetDouble();
+                    await RefreshStopsInViewportAsync(north, south, east, west);
+                    break;
+            }
+        }
+        catch (Exception)
+        {
+            // Malformed/unexpected message from the page: not worth surfacing to the user.
+        }
     }
 
     private async Task RefreshBusPositionsAsync()
@@ -209,6 +247,7 @@ public partial class MapWindow : Window
           <div id="map"></div>
           <script>
             let map, stopMarkers = {}, busMarkers = {}, meMarker = null;
+            let viewportDebounceTimer = null;
 
             function initMap(lat, lon, zoom) {
               map = L.map('map').setView([lat, lon], zoom);
@@ -218,12 +257,36 @@ public partial class MapWindow : Window
               }).addTo(map);
             }
 
+            function notifyViewportChanged() {
+              const bounds = map.getBounds();
+              window.chrome.webview.postMessage(JSON.stringify({
+                type: 'viewportChanged',
+                north: bounds.getNorth(), south: bounds.getSouth(),
+                east: bounds.getEast(), west: bounds.getWest()
+              }));
+            }
+
+            // Browse-mode only: re-search stops within the visible area after panning/zooming settles,
+            // instead of leaving the initial fixed set of markers stale forever.
+            function enableViewportStopSearch() {
+              map.on('moveend', () => {
+                clearTimeout(viewportDebounceTimer);
+                viewportDebounceTimer = setTimeout(notifyViewportChanged, 500);
+              });
+            }
+
             function addStopMarker(id, lat, lon, label, selectable) {
-              const marker = L.marker([lat, lon]).addTo(map).bindPopup(label);
+              const marker = L.marker([lat, lon]).addTo(map)
+                .bindTooltip(label, { direction: 'top', offset: [0, -30] });
               if (selectable) {
-                marker.on('click', () => window.chrome.webview.postMessage(id));
+                marker.on('click', () => window.chrome.webview.postMessage(JSON.stringify({ type: 'select', stopId: id })));
               }
               stopMarkers[id] = marker;
+            }
+
+            function clearStopMarkers() {
+              for (const id in stopMarkers) map.removeLayer(stopMarkers[id]);
+              stopMarkers = {};
             }
 
             function addMeMarker(lat, lon) {
