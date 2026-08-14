@@ -18,6 +18,7 @@ Scarica `MonitorFermataAtacRoma-Setup-1.0.0.exe` qui sotto ed eseguilo.
 L'installer:
 - non richiede prerequisiti aggiuntivi (l'app è self-contained, include il runtime .NET)
 - richiede **Microsoft Edge WebView2 Runtime** per la funzione mappa — quasi sempre già presente su Windows 10/11 aggiornati; se mancante, l'installer te lo segnala con il link per scaricarlo
+- installa per l'utente corrente (in `%LocalAppData%`): **non serve essere amministratori**
 
 ### Fonte dati
 

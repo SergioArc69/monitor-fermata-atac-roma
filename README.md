@@ -18,6 +18,8 @@ Scarica l'ultimo installer dalla pagina [Releases](https://github.com/SergioArc6
 
 L'app è pubblicata come eseguibile *self-contained*: non richiede di installare .NET separatamente. Per la funzione mappa serve **Microsoft Edge WebView2 Runtime**, quasi sempre già presente su Windows 10/11 aggiornati; se mancante, l'installer lo segnala con il link per scaricarlo.
 
+L'installazione è per-utente (in `%LocalAppData%`): **non servono permessi di amministratore**.
+
 ## Requisiti per compilare dai sorgenti
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download) (Windows)
