@@ -98,10 +98,18 @@ public partial class MapWindow : Window
         }
     }
 
+    private static readonly (double Lat, double Lon) RomeCenter = (41.9028, 12.4964);
+    private const double MaxDistanceFromRomeCenterKm = 50;
+
     private async Task ShowNearbyStopsAsync()
     {
         var location = await GetCurrentLocationAsync();
-        var (lat, lon) = location ?? (41.9028, 12.4964); // fallback: Roma centro
+        if (location is not null && DistanceKm(location.Value.Lat, location.Value.Lon, RomeCenter.Lat, RomeCenter.Lon) > MaxDistanceFromRomeCenterKm)
+        {
+            // Too far from the area served by Roma Mobilità: there are certainly no stops to show there.
+            location = null;
+        }
+        var (lat, lon) = location ?? RomeCenter;
 
         InstructionTextBlock.Text = location is not null
             ? "Fermate vicino alla tua posizione: clicca su una fermata per selezionarla, oppure sposta o zooma la mappa per cercarne altre."
@@ -213,6 +221,18 @@ public partial class MapWindow : Window
         {
             // Best-effort live overlay: a transient feed hiccup shouldn't break the dialog.
         }
+    }
+
+    private static double DistanceKm(double lat1, double lon1, double lat2, double lon2)
+    {
+        const double earthRadiusKm = 6371.0;
+        var dLat = double.DegreesToRadians(lat2 - lat1);
+        var dLon = double.DegreesToRadians(lon2 - lon1);
+        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+                Math.Cos(double.DegreesToRadians(lat1)) * Math.Cos(double.DegreesToRadians(lat2)) *
+                Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
+        var c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+        return earthRadiusKm * c;
     }
 
     private static async Task<(double Lat, double Lon)?> GetCurrentLocationAsync()
