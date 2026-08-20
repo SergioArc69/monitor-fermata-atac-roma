@@ -2,6 +2,10 @@
 
 App desktop per Windows che mostra in tempo reale gli orari di arrivo degli autobus (ATAC / Roma TPL) a una fermata di Roma, usando i feed **GTFS** e **GTFS-RT** open data di [Roma Mobilità](https://romamobilita.it/it/tecnologie/open-data/dataset).
 
+## Novità !
+### Ho pubblicato anche la versione "sorella" [Monitor Fermata ATAC Roma — Chrome-Extension](https://github.com/SergioArc69/monitor-fermata-roma_chrome-ext), pensata per essere installata nei browser "Chromium", disponibile sul [Chrome Web Store](https://chromewebstore.google.com/detail/gggjfmkiafdeembhhglhgeignejpjdnc).
+
+
 ## Funzionalità
 
 - 🔍 Ricerca fermate per codice o per nome, con suggerimenti live e ultime fermate monitorate (MRU)
