@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
+using MonitorFermataAtacRoma.Models;
 using MonitorFermataAtacRoma.Services;
 using Geo = Windows.Devices.Geolocation;
 
@@ -16,10 +17,20 @@ public partial class MapWindow : Window
     private readonly GtfsStaticData _staticData;
     private readonly GtfsRealtimeService? _realtimeService;
     private readonly VehiclePositionsService? _vehiclePositions;
-    private readonly string? _monitoredStopId;
+    private string? _monitoredStopId;
     private readonly DispatcherTimer? _busRefreshTimer;
 
+    // The upstream GTFS-RT feed drops a stop's stop_time_update entry almost as soon as the bus
+    // passes it — it does NOT keep reporting it for minutes afterwards. So to keep recently-passed
+    // buses on the map for RecentlyPassedLookbackMinutes, we have to remember their last-seen
+    // arrival ourselves rather than expecting the feed to still have it on a later poll.
+    private readonly Dictionary<string, ArrivalInfo> _recentArrivalsByTripId = new();
+
     public string? SelectedStopId { get; private set; }
+
+    /// <summary>True if the user used the "Ferma monitoraggio" button while this dialog was open —
+    /// the caller should stop monitoring in the main window too, not just switch this map to browse-mode.</summary>
+    public bool MonitoringWasStopped { get; private set; }
 
     /// <param name="monitoredStopId">
     /// Null: browse-mode, shows stops near the current location and lets the user pick one.
@@ -50,6 +61,27 @@ public partial class MapWindow : Window
 
     private void MapWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e) => _busRefreshTimer?.Stop();
 
+    private async void StopMonitoringButton_Click(object sender, RoutedEventArgs e)
+    {
+        StopMonitoringButton.IsEnabled = false;
+        try
+        {
+            _busRefreshTimer?.Stop();
+            _monitoredStopId = null;
+            MonitoringWasStopped = true;
+            BusStatusList.ItemsSource = Array.Empty<string>();
+
+            await ExecuteScriptAsync("clearBusMarkers(); clearStopMarkers();");
+            StopMonitoringButton.Visibility = Visibility.Collapsed;
+
+            await ShowNearbyStopsAsync();
+        }
+        finally
+        {
+            StopMonitoringButton.IsEnabled = true;
+        }
+    }
+
     private async void MapWindow_Loaded(object sender, RoutedEventArgs e)
     {
         // async void: any unhandled exception here would crash the whole app, not just this dialog
@@ -78,6 +110,7 @@ public partial class MapWindow : Window
             {
                 _staticData.TryGetStopName(_monitoredStopId, out var stopName);
                 InstructionTextBlock.Text = "Fermata monitorata, con la posizione dei bus in transito (aggiornata ogni 15 secondi).";
+                StopMonitoringButton.Visibility = Visibility.Visible;
 
                 await ExecuteScriptAsync($"initMap({Fmt(lat)}, {Fmt(lon)}, 16);");
                 await ExecuteScriptAsync($"addStopMarker('{_monitoredStopId}', {Fmt(lat)}, {Fmt(lon)}, {JsString(BuildStopTooltip(_monitoredStopId, stopName))}, false);");
@@ -173,6 +206,9 @@ public partial class MapWindow : Window
         }
     }
 
+    /// <summary>Buses that already passed the stop stay visible on the map, in blue, for this long afterwards.</summary>
+    private const int RecentlyPassedLookbackMinutes = 10;
+
     private async Task RefreshBusPositionsAsync()
     {
         if (_vehiclePositions is null || _realtimeService is null || _monitoredStopId is null) return;
@@ -180,35 +216,54 @@ public partial class MapWindow : Window
         try
         {
             // Re-fetch live arrivals every tick (rather than reusing a snapshot from when the dialog
-            // opened) so a bus that has already passed the stop naturally drops out of tracking instead
-            // of lingering on the map with a frozen, increasingly wrong ETA.
-            var arrivals = await _realtimeService.GetArrivalsForStopAsync(_monitoredStopId);
-            var arrivalByTripId = arrivals.GroupBy(a => a.TripId).ToDictionary(g => g.Key, g => g.First());
+            // opened) and merge them into our own short-term memory, since the feed itself drops a
+            // stop's entry almost as soon as the bus passes it — see _recentArrivalsByTripId.
+            var freshArrivals = await _realtimeService.GetArrivalsForStopAsync(_monitoredStopId);
+            foreach (var arrival in freshArrivals)
+                _recentArrivalsByTripId[arrival.TripId] = arrival;
+
+            var cutoff = DateTime.Now.AddMinutes(-RecentlyPassedLookbackMinutes);
+            foreach (var tripId in _recentArrivalsByTripId.Where(kv => kv.Value.ArrivalTime < cutoff).Select(kv => kv.Key).ToList())
+                _recentArrivalsByTripId.Remove(tripId);
 
             await ExecuteScriptAsync("clearBusMarkers();");
 
-            if (arrivalByTripId.Count == 0)
+            if (_recentArrivalsByTripId.Count == 0)
             {
                 BusStatusList.ItemsSource = Array.Empty<string>();
                 return;
             }
 
+            var arrivalByTripId = _recentArrivalsByTripId;
             var positions = await _vehiclePositions.GetPositionsForTripsAsync(arrivalByTripId.Keys.ToHashSet());
 
+            var now = DateTime.Now;
             var statusChips = new List<string>();
             foreach (var p in positions)
             {
-                var label = string.IsNullOrEmpty(p.VehicleLabel) ? "?" : p.VehicleLabel;
+                var vehicleLabel = string.IsNullOrEmpty(p.VehicleLabel) ? "?" : p.VehicleLabel;
+                var hasPassed = arrivalByTripId.TryGetValue(p.TripId, out var arrival) && arrival.ArrivalTime < now;
+                // Prefix with the route so it's clear which line each bus belongs to at stops served by several.
+                var label = arrival is not null ? $"[{arrival.RouteLabel}] {vehicleLabel}" : vehicleLabel;
                 var etaLabel = "";
-                if (arrivalByTripId.TryGetValue(p.TripId, out var arrival))
+                if (arrival is not null)
                 {
-                    var prefix = arrival.MinutesLabel == "in arrivo" ? "" : "tra ";
-                    etaLabel = $"{prefix}{arrival.MinutesLabel} ({arrival.ArrivalTime:HH:mm:ss})";
+                    if (hasPassed)
+                    {
+                        var minutesAgo = Math.Max(0, (int)Math.Round((now - arrival.ArrivalTime).TotalMinutes));
+                        var passedLabel = minutesAgo <= 0 ? "poco fa" : $"{minutesAgo} min fa";
+                        etaLabel = $"{passedLabel} ({arrival.ArrivalTime:HH:mm:ss})";
+                    }
+                    else
+                    {
+                        var prefix = arrival.MinutesLabel == "in arrivo" ? "" : "tra ";
+                        etaLabel = $"{prefix}{arrival.MinutesLabel} ({arrival.ArrivalTime:HH:mm:ss})";
+                    }
                 }
-                var statusLabel = p.IsStopped ? "fermo" : "in movimento";
+                var statusLabel = hasPassed ? "già passato" : p.IsStopped ? "fermo" : "in movimento";
 
                 await ExecuteScriptAsync(
-                    $"addBusMarker('{p.TripId}', {Fmt(p.Lat)}, {Fmt(p.Lon)}, {JsString(label)}, {(p.IsStopped ? "true" : "false")}, {JsString(etaLabel)});");
+                    $"addBusMarker('{p.TripId}', {Fmt(p.Lat)}, {Fmt(p.Lon)}, {JsString(label)}, {(p.IsStopped ? "true" : "false")}, {JsString(etaLabel)}, {(hasPassed ? "true" : "false")});");
 
                 statusChips.Add(string.IsNullOrEmpty(etaLabel)
                     ? $"🚌 {label}: {statusLabel}"
@@ -252,7 +307,13 @@ public partial class MapWindow : Window
         }
     }
 
-    private Task ExecuteScriptAsync(string script) => MapWebView.CoreWebView2.ExecuteScriptAsync(script);
+    /// <summary>
+    /// CoreWebView2 can go null while the dialog is closing (e.g. a bus-refresh tick already in
+    /// flight resumes after an await, right as the WebView2 control is torn down) — no-op instead
+    /// of throwing a NullReferenceException in that case.
+    /// </summary>
+    private Task ExecuteScriptAsync(string script) =>
+        MapWebView.CoreWebView2?.ExecuteScriptAsync(script) ?? Task.CompletedTask;
 
     private static string Fmt(double value) => value.ToString(CultureInfo.InvariantCulture);
 
@@ -270,6 +331,7 @@ public partial class MapWindow : Window
             .bus-icon { font-size: 20px; text-align: center; line-height: 24px; filter: drop-shadow(0 0 2px white); }
             .bus-icon.stopped { filter: drop-shadow(0 0 3px #d32f2f) drop-shadow(0 0 3px #d32f2f); }
             .bus-icon.moving { filter: drop-shadow(0 0 3px #2e7d32) drop-shadow(0 0 3px #2e7d32); }
+            .bus-icon.passed { filter: drop-shadow(0 0 3px #1a73e8) drop-shadow(0 0 3px #1a73e8); opacity: 0.8; }
           </style>
         </head>
         <body>
@@ -277,13 +339,20 @@ public partial class MapWindow : Window
           <script>
             let map, stopMarkers = {}, busMarkers = {}, meMarker = null;
             let viewportDebounceTimer = null;
+            let viewportHandler = null;
 
+            // Idempotent: the dialog can switch from monitor-mode back to browse-mode (and vice
+            // versa) without ever tearing down the WebView, so a second call just recenters.
             function initMap(lat, lon, zoom) {
-              map = L.map('map').setView([lat, lon], zoom);
-              L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                maxZoom: 19,
-                attribution: '&copy; OpenStreetMap contributors'
-              }).addTo(map);
+              if (!map) {
+                map = L.map('map').setView([lat, lon], zoom);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                  maxZoom: 19,
+                  attribution: '&copy; OpenStreetMap contributors'
+                }).addTo(map);
+              } else {
+                map.setView([lat, lon], zoom);
+              }
             }
 
             function notifyViewportChanged() {
@@ -298,10 +367,12 @@ public partial class MapWindow : Window
             // Browse-mode only: re-search stops within the visible area after panning/zooming settles,
             // instead of leaving the initial fixed set of markers stale forever.
             function enableViewportStopSearch() {
-              map.on('moveend', () => {
+              if (viewportHandler) map.off('moveend', viewportHandler);
+              viewportHandler = () => {
                 clearTimeout(viewportDebounceTimer);
                 viewportDebounceTimer = setTimeout(notifyViewportChanged, 500);
-              });
+              };
+              map.on('moveend', viewportHandler);
             }
 
             function addStopMarker(id, lat, lon, label, selectable) {
@@ -324,10 +395,10 @@ public partial class MapWindow : Window
                 .addTo(map).bindPopup('La tua posizione');
             }
 
-            function addBusMarker(id, lat, lon, label, isStopped, eta) {
-              const statusClass = isStopped ? 'stopped' : 'moving';
+            function addBusMarker(id, lat, lon, label, isStopped, eta, hasPassed) {
+              const statusClass = hasPassed ? 'passed' : (isStopped ? 'stopped' : 'moving');
               const icon = L.divIcon({ className: 'bus-icon ' + statusClass, html: '🚌', iconSize: [24, 24] });
-              let popup = label + ' — ' + (isStopped ? 'fermo' : 'in movimento');
+              let popup = label + ' — ' + (hasPassed ? 'già passato' : (isStopped ? 'fermo' : 'in movimento'));
               if (eta) popup += '<br>' + eta;
               busMarkers[id] = L.marker([lat, lon], { icon }).addTo(map).bindPopup(popup);
             }

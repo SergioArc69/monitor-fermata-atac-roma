@@ -296,8 +296,14 @@ public partial class MainWindow : Window
             : new MapWindow(_staticData, null, null, null);
         dialog.Owner = this;
 
-        if (dialog.ShowDialog() == true && dialog.SelectedStopId is not null)
+        var dialogResult = dialog.ShowDialog();
+        if (dialogResult == true && dialog.SelectedStopId is not null)
             StopIdComboBox.Text = dialog.SelectedStopId;
+
+        // The user pressed "Ferma monitoraggio" inside the map dialog: mirror that in the main
+        // window too, not just in the (now closed) map view.
+        if (dialog.MonitoringWasStopped && _monitoredStopId is not null)
+            StopButton_Click(this, new RoutedEventArgs());
     }
 
     private void SettingsButton_Click(object sender, RoutedEventArgs e)

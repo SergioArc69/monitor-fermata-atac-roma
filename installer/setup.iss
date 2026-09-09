@@ -2,7 +2,7 @@
 ; Build with installer\build.ps1, which publishes the app and then compiles this script.
 
 #define MyAppName "Monitor Fermata ATAC Roma"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Sergio Arcangeli"
 #define MyAppExeName "MonitorFermataAtacRoma.exe"
 #define MyPublishDir "..\publish"

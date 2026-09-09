@@ -299,27 +299,43 @@ public sealed class GtfsStaticData
     /// </summary>
     public IReadOnlyList<ScheduledArrival> GetScheduledArrivals(string stopId, int maxResults)
     {
-        var now = DateTime.Now;
-        var today = DateOnly.FromDateTime(now);
-        var todayKey = today.Year * 10000 + today.Month * 100 + today.Day;
-
         if (!File.Exists(_cacheFilePath)) return Array.Empty<ScheduledArrival>();
 
+        var now = DateTime.Now;
+
         using var zip = ZipFile.OpenRead(_cacheFilePath);
+
+        var results = CollectScheduledArrivals(zip, stopId, now.Date, now.AddMinutes(-1));
+
+        if (results.Count < maxResults)
+        {
+            // Service for today may have ended (e.g. monitoring a stop late at night, after the
+            // last run): pad with tomorrow's first runs instead of leaving the line empty.
+            var tomorrow = now.Date.AddDays(1);
+            results.AddRange(CollectScheduledArrivals(zip, stopId, tomorrow, DateTime.MinValue));
+        }
+
+        return results.OrderBy(r => r.ArrivalTime).Take(maxResults).ToList();
+    }
+
+    private List<ScheduledArrival> CollectScheduledArrivals(ZipArchive zip, string stopId, DateTime dayStart, DateTime minArrivalTime)
+    {
+        var results = new List<ScheduledArrival>();
+
         var entry = zip.GetEntry("stop_times.txt");
-        if (entry is null) return Array.Empty<ScheduledArrival>();
+        if (entry is null) return results;
 
         using var reader = new StreamReader(entry.Open());
         var headerLine = reader.ReadLine();
-        if (headerLine is null) return Array.Empty<ScheduledArrival>();
+        if (headerLine is null) return results;
 
         var headers = ParseCsvLine(headerLine);
         var tripIdx = headers.IndexOf("trip_id");
         var stopIdx = headers.IndexOf("stop_id");
         var arrivalIdx = headers.IndexOf("arrival_time");
-        if (tripIdx < 0 || stopIdx < 0 || arrivalIdx < 0) return Array.Empty<ScheduledArrival>();
+        if (tripIdx < 0 || stopIdx < 0 || arrivalIdx < 0) return results;
 
-        var results = new List<ScheduledArrival>();
+        var dayKey = dayStart.Year * 10000 + dayStart.Month * 100 + dayStart.Day;
 
         while (reader.ReadLine() is { } line)
         {
@@ -332,17 +348,17 @@ public sealed class GtfsStaticData
 
             var tripId = fields[tripIdx];
             if (!_trips.TryGetValue(tripId, out var trip)) continue;
-            if (!_activeServiceDates.Contains((trip.ServiceId, todayKey))) continue;
+            if (!_activeServiceDates.Contains((trip.ServiceId, dayKey))) continue;
 
             if (!TryParseGtfsTimeOfDay(fields[arrivalIdx], out var timeOfDay)) continue;
-            var arrivalTime = now.Date.Add(timeOfDay); // GTFS allows hours >= 24 for past-midnight trips
-            if (arrivalTime < now.AddMinutes(-1)) continue;
+            var arrivalTime = dayStart.Add(timeOfDay); // GTFS allows hours >= 24 for past-midnight trips
+            if (arrivalTime < minArrivalTime) continue;
 
             var (routeLabel, headsign) = DescribeTrip(tripId, trip.RouteId);
             results.Add(new ScheduledArrival(tripId, routeLabel, headsign, arrivalTime));
         }
 
-        return results.OrderBy(r => r.ArrivalTime).Take(maxResults).ToList();
+        return results;
     }
 
     private static bool TryParseGtfsTimeOfDay(string value, out TimeSpan timeOfDay)

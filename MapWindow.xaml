@@ -16,8 +16,18 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock x:Name="InstructionTextBlock" Grid.Row="0" Margin="0,0,0,8" TextWrapping="Wrap"
-                   Text="Caricamento mappa..."/>
+        <Grid Grid.Row="0" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <TextBlock x:Name="InstructionTextBlock" Grid.Column="0" TextWrapping="Wrap" VerticalAlignment="Center"
+                       Text="Caricamento mappa..."/>
+
+            <Button x:Name="StopMonitoringButton" Grid.Column="1" Content="Ferma monitoraggio"
+                    Margin="10,0,0,0" Padding="10,4" Visibility="Collapsed" Click="StopMonitoringButton_Click"/>
+        </Grid>
 
         <Border Grid.Row="1" BorderBrush="#FFCCCCCC" BorderThickness="1">
             <wv2:WebView2 x:Name="MapWebView"/>

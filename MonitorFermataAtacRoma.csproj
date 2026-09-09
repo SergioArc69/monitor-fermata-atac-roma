@@ -8,9 +8,9 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>Assets\bus.ico</ApplicationIcon>
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
     <Product>Monitor Fermata ATAC Roma</Product>
     <Description>Monitor arrivi bus in tempo reale (GTFS-RT) per le fermate di Roma</Description>
   </PropertyGroup>
@@ -48,10 +48,8 @@
 
   <!-- CopyToPublishDirectory metadata alone isn't reliably honored for this native asset under
        PublishSingleFile, so guarantee the loose file lands next to the exe with an explicit copy. -->
-  <Target Name="CopyWebView2LoaderAfterPublish" AfterTargets="Publish"
-          Condition="'$(RuntimeIdentifier)' == 'win-x64' AND Exists('$(PkgMicrosoft_Web_WebView2)\runtimes\win-x64\native\WebView2Loader.dll')">
-    <Copy SourceFiles="$(PkgMicrosoft_Web_WebView2)\runtimes\win-x64\native\WebView2Loader.dll"
-          DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+  <Target Name="CopyWebView2LoaderAfterPublish" AfterTargets="Publish" Condition="'$(RuntimeIdentifier)' == 'win-x64' AND Exists('$(PkgMicrosoft_Web_WebView2)\runtimes\win-x64\native\WebView2Loader.dll')">
+    <Copy SourceFiles="$(PkgMicrosoft_Web_WebView2)\runtimes\win-x64\native\WebView2Loader.dll" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

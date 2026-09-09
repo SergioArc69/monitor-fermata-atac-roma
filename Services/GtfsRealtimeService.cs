@@ -22,6 +22,7 @@ public sealed class GtfsRealtimeService
         var bytes = await _httpClient.GetByteArrayAsync(TripUpdatesUrl, ct);
         var feed = FeedMessage.Parser.ParseFrom(bytes);
 
+        var minTime = DateTime.Now.AddMinutes(-1);
         var arrivals = new List<ArrivalInfo>();
 
         foreach (var entity in feed.Entity)
@@ -37,6 +38,8 @@ public sealed class GtfsRealtimeService
                 if (stopTimeEvent is null || !stopTimeEvent.HasTime) continue;
 
                 var arrivalTime = DateTimeOffset.FromUnixTimeSeconds(stopTimeEvent.Time).ToLocalTime().DateTime;
+                if (arrivalTime <= minTime) continue;
+
                 var delaySeconds = stopTimeEvent.HasDelay ? stopTimeEvent.Delay : 0;
 
                 var (routeLabel, headsign) = _staticData.DescribeTrip(tripUpdate.Trip.TripId, tripUpdate.Trip.RouteId);
@@ -53,9 +56,6 @@ public sealed class GtfsRealtimeService
             }
         }
 
-        return arrivals
-            .Where(a => a.ArrivalTime > DateTime.Now.AddMinutes(-1))
-            .OrderBy(a => a.ArrivalTime)
-            .ToList();
+        return arrivals.OrderBy(a => a.ArrivalTime).ToList();
     }
 }
