@@ -12,7 +12,7 @@ namespace MonitorFermataAtacRoma;
 
 public partial class MapWindow : Window
 {
-    private static readonly TimeSpan BusRefreshInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan BusRefreshInterval = TimeSpan.FromSeconds(20);
 
     private readonly GtfsStaticData _staticData;
     private readonly GtfsRealtimeService? _realtimeService;
@@ -109,7 +109,7 @@ public partial class MapWindow : Window
             if (_monitoredStopId is not null && _staticData.TryGetStopLocation(_monitoredStopId, out var lat, out var lon))
             {
                 _staticData.TryGetStopName(_monitoredStopId, out var stopName);
-                InstructionTextBlock.Text = "Fermata monitorata, con la posizione dei bus in transito (aggiornata ogni 15 secondi).";
+                InstructionTextBlock.Text = "Fermata monitorata, con la posizione dei bus in transito (aggiornata ogni 20 secondi).";
                 StopMonitoringButton.Visibility = Visibility.Visible;
 
                 await ExecuteScriptAsync($"initMap({Fmt(lat)}, {Fmt(lon)}, 16);");
@@ -209,16 +209,36 @@ public partial class MapWindow : Window
     /// <summary>Buses that already passed the stop stay visible on the map, in blue, for this long afterwards.</summary>
     private const int RecentlyPassedLookbackMinutes = 10;
 
+    /// <summary>
+    /// A bus is only treated as "already passed" once it has BOTH dropped out of the TripUpdates
+    /// feed for this stop (producers remove a stop the moment the vehicle passes it) AND its last
+    /// predicted arrival is comfortably in the past. Time alone isn't enough: a late bus that's
+    /// still approaching keeps a stale-looking prediction while its real position shows otherwise.
+    /// </summary>
+    private const int PassedConfirmGraceSeconds = 90;
+
+    private bool _busRefreshInFlight;
+
     private async Task RefreshBusPositionsAsync()
     {
         if (_vehiclePositions is null || _realtimeService is null || _monitoredStopId is null) return;
+
+        // A slow previous refresh still resolving its fetches would otherwise interleave with this
+        // one (Tick can fire again while the handler is awaiting) and leak duplicate markers.
+        if (_busRefreshInFlight) return;
+        _busRefreshInFlight = true;
+        var stopId = _monitoredStopId;
 
         try
         {
             // Re-fetch live arrivals every tick (rather than reusing a snapshot from when the dialog
             // opened) and merge them into our own short-term memory, since the feed itself drops a
             // stop's entry almost as soon as the bus passes it — see _recentArrivalsByTripId.
-            var freshArrivals = await _realtimeService.GetArrivalsForStopAsync(_monitoredStopId);
+            var freshArrivals = await _realtimeService.GetArrivalsForStopAsync(stopId);
+            if (_monitoredStopId != stopId) return;
+
+            // Trips still listed for this stop haven't passed it yet, however late they're running.
+            var stillApproaching = freshArrivals.Select(a => a.TripId).ToHashSet();
             foreach (var arrival in freshArrivals)
                 _recentArrivalsByTripId[arrival.TripId] = arrival;
 
@@ -226,25 +246,46 @@ public partial class MapWindow : Window
             foreach (var tripId in _recentArrivalsByTripId.Where(kv => kv.Value.ArrivalTime < cutoff).Select(kv => kv.Key).ToList())
                 _recentArrivalsByTripId.Remove(tripId);
 
-            await ExecuteScriptAsync("clearBusMarkers();");
-
             if (_recentArrivalsByTripId.Count == 0)
             {
+                await ExecuteScriptAsync("clearBusMarkers();");
                 BusStatusList.ItemsSource = Array.Empty<string>();
                 return;
             }
 
             var arrivalByTripId = _recentArrivalsByTripId;
             var positions = await _vehiclePositions.GetPositionsForTripsAsync(arrivalByTripId.Keys.ToHashSet());
+            if (_monitoredStopId != stopId) return;
+
+            // For buses currently stopped, look up the realtime predicted departure from the stop
+            // they're sitting at, so the chip can show when they're expected to move on.
+            var stoppedTripStops = positions
+                .Where(p => p.IsStopped && !string.IsNullOrEmpty(p.CurrentStopId))
+                .GroupBy(p => p.TripId)
+                .ToDictionary(g => g.Key, g => g.First().CurrentStopId);
+            var predictedDepartures = await _realtimeService.GetPredictedDeparturesAtStopsAsync(stoppedTripStops);
+            if (_monitoredStopId != stopId) return;
+
+            // Replace this tick's snapshot in one go, only after every fetch has resolved — clearing
+            // earlier would leave the map empty during the fetch window.
+            await ExecuteScriptAsync("clearBusMarkers();");
 
             var now = DateTime.Now;
             var statusChips = new List<string>();
             foreach (var p in positions)
             {
                 var vehicleLabel = string.IsNullOrEmpty(p.VehicleLabel) ? "?" : p.VehicleLabel;
-                var hasPassed = arrivalByTripId.TryGetValue(p.TripId, out var arrival) && arrival.ArrivalTime < now;
+                arrivalByTripId.TryGetValue(p.TripId, out var arrival);
+                var hasPassed = arrival is not null
+                    && !stillApproaching.Contains(p.TripId)
+                    && arrival.ArrivalTime < now.AddSeconds(-PassedConfirmGraceSeconds);
                 // Prefix with the route so it's clear which line each bus belongs to at stops served by several.
                 var label = arrival is not null ? $"[{arrival.RouteLabel}] {vehicleLabel}" : vehicleLabel;
+
+                DateTime? departureTime = !hasPassed && p.IsStopped && predictedDepartures.TryGetValue(p.TripId, out var dep)
+                    ? dep
+                    : null;
+
                 var etaLabel = "";
                 if (arrival is not null)
                 {
@@ -257,13 +298,18 @@ public partial class MapWindow : Window
                     else
                     {
                         var prefix = arrival.MinutesLabel == "in arrivo" ? "" : "tra ";
-                        etaLabel = $"{prefix}{arrival.MinutesLabel} ({arrival.ArrivalTime:HH:mm:ss})";
+                        // When a departure time (|→) is also shown, mark the arrival time with →| to tell the two apart.
+                        var arrivalMark = departureTime is not null ? "→| " : "";
+                        etaLabel = $"{prefix}{arrival.MinutesLabel} ({arrivalMark}{arrival.ArrivalTime:HH:mm:ss})";
                     }
                 }
+
+                var statusClass = hasPassed ? "passed" : p.IsStopped ? "stopped" : "moving";
                 var statusLabel = hasPassed ? "già passato" : p.IsStopped ? "fermo" : "in movimento";
+                if (departureTime is not null) statusLabel = $"fermo ({departureTime:HH:mm:ss} |→)";
 
                 await ExecuteScriptAsync(
-                    $"addBusMarker('{p.TripId}', {Fmt(p.Lat)}, {Fmt(p.Lon)}, {JsString(label)}, {(p.IsStopped ? "true" : "false")}, {JsString(etaLabel)}, {(hasPassed ? "true" : "false")});");
+                    $"addBusMarker('{p.TripId}', {Fmt(p.Lat)}, {Fmt(p.Lon)}, {JsString(label)}, {JsString(statusClass)}, {JsString(statusLabel)}, {JsString(etaLabel)});");
 
                 statusChips.Add(string.IsNullOrEmpty(etaLabel)
                     ? $"🚌 {label}: {statusLabel}"
@@ -275,6 +321,10 @@ public partial class MapWindow : Window
         catch (Exception)
         {
             // Best-effort live overlay: a transient feed hiccup shouldn't break the dialog.
+        }
+        finally
+        {
+            _busRefreshInFlight = false;
         }
     }
 
@@ -395,10 +445,10 @@ public partial class MapWindow : Window
                 .addTo(map).bindPopup('La tua posizione');
             }
 
-            function addBusMarker(id, lat, lon, label, isStopped, eta, hasPassed) {
-              const statusClass = hasPassed ? 'passed' : (isStopped ? 'stopped' : 'moving');
+            function addBusMarker(id, lat, lon, label, statusClass, statusLabel, eta) {
+              if (busMarkers[id]) map.removeLayer(busMarkers[id]); // never leave the previous position's marker behind
               const icon = L.divIcon({ className: 'bus-icon ' + statusClass, html: '🚌', iconSize: [24, 24] });
-              let popup = label + ' — ' + (hasPassed ? 'già passato' : (isStopped ? 'fermo' : 'in movimento'));
+              let popup = label + ' — ' + statusLabel;
               if (eta) popup += '<br>' + eta;
               busMarkers[id] = L.marker([lat, lon], { icon }).addTo(map).bindPopup(popup);
             }

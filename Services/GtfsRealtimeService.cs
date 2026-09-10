@@ -7,9 +7,15 @@ namespace MonitorFermataAtacRoma.Services;
 public sealed class GtfsRealtimeService
 {
     private const string TripUpdatesUrl = "https://romamobilita.it/sites/default/files/rome_rtgtfs_trip_updates_feed.pb";
+    private static readonly TimeSpan FeedCacheLifetime = TimeSpan.FromSeconds(10);
 
     private readonly HttpClient _httpClient;
     private readonly GtfsStaticData _staticData;
+
+    // Short-lived memo of the decoded TripUpdates feed so back-to-back calls within one map refresh
+    // tick (arrivals + stopped-bus departures) don't fetch and parse the same feed twice.
+    private FeedMessage? _cachedFeed;
+    private DateTime _cachedFeedAt;
 
     public GtfsRealtimeService(HttpClient httpClient, GtfsStaticData staticData)
     {
@@ -17,10 +23,19 @@ public sealed class GtfsRealtimeService
         _staticData = staticData;
     }
 
+    private async Task<FeedMessage> GetTripUpdatesFeedAsync(CancellationToken ct)
+    {
+        if (_cachedFeed is not null && DateTime.UtcNow - _cachedFeedAt < FeedCacheLifetime) return _cachedFeed;
+
+        var bytes = await _httpClient.GetByteArrayAsync(TripUpdatesUrl, ct);
+        _cachedFeed = FeedMessage.Parser.ParseFrom(bytes);
+        _cachedFeedAt = DateTime.UtcNow;
+        return _cachedFeed;
+    }
+
     public async Task<IReadOnlyList<ArrivalInfo>> GetArrivalsForStopAsync(string stopId, CancellationToken ct = default)
     {
-        var bytes = await _httpClient.GetByteArrayAsync(TripUpdatesUrl, ct);
-        var feed = FeedMessage.Parser.ParseFrom(bytes);
+        var feed = await GetTripUpdatesFeedAsync(ct);
 
         var minTime = DateTime.Now.AddMinutes(-1);
         var arrivals = new List<ArrivalInfo>();
@@ -57,5 +72,39 @@ public sealed class GtfsRealtimeService
         }
 
         return arrivals.OrderBy(a => a.ArrivalTime).ToList();
+    }
+
+    /// <summary>
+    /// For each <c>tripId → stopId</c> pair, the realtime predicted departure time at that stop from
+    /// the TripUpdates feed — used to show when a currently-stopped bus is expected to leave the stop
+    /// it's sitting at. Trips/stops with no matching prediction are simply omitted from the result.
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, DateTime>> GetPredictedDeparturesAtStopsAsync(
+        IReadOnlyDictionary<string, string> tripStops, CancellationToken ct = default)
+    {
+        var result = new Dictionary<string, DateTime>();
+        if (tripStops.Count == 0) return result;
+
+        var feed = await GetTripUpdatesFeedAsync(ct);
+
+        foreach (var entity in feed.Entity)
+        {
+            var tripUpdate = entity.TripUpdate;
+            if (tripUpdate?.Trip is null) continue;
+            if (!tripStops.TryGetValue(tripUpdate.Trip.TripId, out var wantedStopId)) continue;
+
+            foreach (var stopTimeUpdate in tripUpdate.StopTimeUpdate)
+            {
+                if (stopTimeUpdate.StopId != wantedStopId) continue;
+
+                var stopTimeEvent = stopTimeUpdate.Departure ?? stopTimeUpdate.Arrival;
+                if (stopTimeEvent is null || !stopTimeEvent.HasTime) continue;
+
+                result[tripUpdate.Trip.TripId] = DateTimeOffset.FromUnixTimeSeconds(stopTimeEvent.Time).ToLocalTime().DateTime;
+                break;
+            }
+        }
+
+        return result;
     }
 }

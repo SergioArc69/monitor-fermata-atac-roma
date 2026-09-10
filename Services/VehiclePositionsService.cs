@@ -29,8 +29,9 @@ public sealed class VehiclePositionsService
 
             var isStopped = vehicle.HasCurrentStatus && vehicle.CurrentStatus == VehiclePosition.Types.VehicleStopStatus.StoppedAt;
             var vehicleLabel = string.IsNullOrEmpty(vehicle.Vehicle?.Label) ? vehicle.Vehicle?.Id ?? "" : vehicle.Vehicle.Label;
+            var currentStopId = vehicle.HasStopId ? vehicle.StopId : "";
 
-            positions.Add(new AppVehiclePosition(vehicle.Trip.TripId, vehicleLabel, vehicle.Position.Latitude, vehicle.Position.Longitude, isStopped));
+            positions.Add(new AppVehiclePosition(vehicle.Trip.TripId, vehicleLabel, vehicle.Position.Latitude, vehicle.Position.Longitude, isStopped, currentStopId));
         }
 
         return positions;
