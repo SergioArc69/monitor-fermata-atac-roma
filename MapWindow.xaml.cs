@@ -374,10 +374,16 @@ public partial class MapWindow : Window
         <html>
         <head>
           <meta charset="utf-8" />
-          <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-          <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+          <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+          <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
           <style>
             html, body, #map { height: 100%; margin: 0; padding: 0; }
+            .stop-marker { font-size: 20px; cursor: default; filter: drop-shadow(0 0 2px white); }
+            .stop-marker.selectable { cursor: pointer; }
+            .me-marker {
+              width: 16px; height: 16px; border-radius: 50%;
+              background: #1a73e8; border: 2px solid white; box-shadow: 0 0 2px rgba(0,0,0,.5);
+            }
             .bus-icon { font-size: 20px; text-align: center; line-height: 24px; filter: drop-shadow(0 0 2px white); }
             .bus-icon.stopped { filter: drop-shadow(0 0 3px #d32f2f) drop-shadow(0 0 3px #d32f2f); }
             .bus-icon.moving { filter: drop-shadow(0 0 3px #2e7d32) drop-shadow(0 0 3px #2e7d32); }
@@ -393,15 +399,36 @@ public partial class MapWindow : Window
 
             // Idempotent: the dialog can switch from monitor-mode back to browse-mode (and vice
             // versa) without ever tearing down the WebView, so a second call just recenters.
+            // Note: MapLibre (unlike Leaflet) takes [lon, lat], not [lat, lon].
             function initMap(lat, lon, zoom) {
               if (!map) {
-                map = L.map('map').setView([lat, lon], zoom);
-                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                  maxZoom: 19,
-                  attribution: '&copy; OpenStreetMap contributors'
-                }).addTo(map);
+                // tile.openstreetmap.org is a volunteer-run server that blocks third-party app
+                // traffic (a WebView2-hosted page has no real referrer, read as "bulk" usage under
+                // its tile usage policy — see https://operations.osmfoundation.org/policies/tiles/).
+                // Wikimedia's raster tiles turned out to be rate-limited in practice, and CARTO's
+                // free basemaps now require an API key — OpenFreeMap is free, unlimited, and needs
+                // no key, but only serves vector tiles, hence MapLibre GL JS instead of Leaflet.
+                map = new maplibregl.Map({
+                  container: 'map',
+                  style: 'https://tiles.openfreemap.org/styles/bright',
+                  center: [lon, lat],
+                  zoom: zoom,
+                  attributionControl: { compact: true, customAttribution: '© OpenStreetMap contributors · © OpenFreeMap' }
+                });
+                map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
+
+                // The "bright" style references a few POI icons (gate, office, swimming_pool, ...)
+                // that aren't in the sprite sheet it's paired with — cosmetic gaps upstream.
+                // setMissingStyleImageResolver is awaited *before* MapLibre treats the image as
+                // missing, so resolving it here (unlike handling 'styleimagemissing', which fires
+                // only after the "could not be loaded" warning is already logged) avoids the
+                // console warning entirely, not just the visual gap.
+                map.setMissingStyleImageResolver((id) => {
+                  if (map.hasImage(id)) return;
+                  map.addImage(id, { width: 1, height: 1, data: new Uint8Array([0, 0, 0, 0]) });
+                });
               } else {
-                map.setView([lat, lon], zoom);
+                map.jumpTo({ center: [lon, lat], zoom: zoom });
               }
             }
 
@@ -426,35 +453,46 @@ public partial class MapWindow : Window
             }
 
             function addStopMarker(id, lat, lon, label, selectable) {
-              const marker = L.marker([lat, lon]).addTo(map)
-                .bindTooltip(label, { direction: 'top', offset: [0, -30] });
+              const el = document.createElement('div');
+              el.className = 'stop-marker' + (selectable ? ' selectable' : '');
+              el.textContent = selectable ? '📍' : '🚏';
+              // Leaflet's bindTooltip showed the label on hover (not click); replicate that with a
+              // popup toggled on mouseenter/mouseleave instead of MapLibre's default click-to-open.
+              const tooltip = new maplibregl.Popup({ offset: 14, closeButton: false, closeOnClick: false }).setHTML(label);
+              el.addEventListener('mouseenter', () => tooltip.setLngLat([lon, lat]).addTo(map));
+              el.addEventListener('mouseleave', () => tooltip.remove());
               if (selectable) {
-                marker.on('click', () => window.chrome.webview.postMessage(JSON.stringify({ type: 'select', stopId: id })));
+                el.addEventListener('click', () => window.chrome.webview.postMessage(JSON.stringify({ type: 'select', stopId: id })));
               }
-              stopMarkers[id] = marker;
+              stopMarkers[id] = new maplibregl.Marker({ element: el }).setLngLat([lon, lat]).addTo(map);
             }
 
             function clearStopMarkers() {
-              for (const id in stopMarkers) map.removeLayer(stopMarkers[id]);
+              for (const id in stopMarkers) stopMarkers[id].remove();
               stopMarkers = {};
             }
 
             function addMeMarker(lat, lon) {
-              if (meMarker) map.removeLayer(meMarker);
-              meMarker = L.circleMarker([lat, lon], { radius: 8, color: '#1a73e8', fillColor: '#1a73e8', fillOpacity: 0.9 })
-                .addTo(map).bindPopup('La tua posizione');
+              if (meMarker) meMarker.remove();
+              const el = document.createElement('div');
+              el.className = 'me-marker';
+              const popup = new maplibregl.Popup({ offset: 10 }).setHTML('La tua posizione');
+              meMarker = new maplibregl.Marker({ element: el }).setLngLat([lon, lat]).setPopup(popup).addTo(map);
             }
 
             function addBusMarker(id, lat, lon, label, statusClass, statusLabel, eta) {
-              if (busMarkers[id]) map.removeLayer(busMarkers[id]); // never leave the previous position's marker behind
-              const icon = L.divIcon({ className: 'bus-icon ' + statusClass, html: '🚌', iconSize: [24, 24] });
-              let popup = label + ' — ' + statusLabel;
-              if (eta) popup += '<br>' + eta;
-              busMarkers[id] = L.marker([lat, lon], { icon }).addTo(map).bindPopup(popup);
+              if (busMarkers[id]) busMarkers[id].remove(); // never leave the previous position's marker behind
+              const el = document.createElement('div');
+              el.className = 'bus-icon ' + statusClass;
+              el.textContent = '🚌';
+              let popupHtml = label + ' — ' + statusLabel;
+              if (eta) popupHtml += '<br>' + eta;
+              const popup = new maplibregl.Popup({ offset: 12 }).setHTML(popupHtml);
+              busMarkers[id] = new maplibregl.Marker({ element: el }).setLngLat([lon, lat]).setPopup(popup).addTo(map);
             }
 
             function clearBusMarkers() {
-              for (const id in busMarkers) map.removeLayer(busMarkers[id]);
+              for (const id in busMarkers) busMarkers[id].remove();
               busMarkers = {};
             }
           </script>
