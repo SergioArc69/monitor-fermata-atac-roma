@@ -18,6 +18,7 @@ public partial class MapWindow : Window
     private readonly GtfsRealtimeService? _realtimeService;
     private readonly VehiclePositionsService? _vehiclePositions;
     private string? _monitoredStopId;
+    private readonly string? _initialCenterStopId;
     private readonly DispatcherTimer? _busRefreshTimer;
 
     // The upstream GTFS-RT feed drops a stop's stop_time_update entry almost as soon as the bus
@@ -26,20 +27,48 @@ public partial class MapWindow : Window
     // arrival ourselves rather than expecting the feed to still have it on a later poll.
     private readonly Dictionary<string, ArrivalInfo> _recentArrivalsByTripId = new();
 
+    // Mirrors the main window's own line filter (see LineFilterCheckBox/LineFilterListBox there),
+    // so the map's bus tracking respects it too instead of always showing every line. Edits made
+    // here are reported back via LineFilterChanged; the main window doesn't push live updates back
+    // the other way since it can't be interacted with while this modal dialog is open anyway.
+    private readonly HashSet<string> _lineFilterSelectedLines;
+    private readonly HashSet<string> _knownLines = new();
+
     public string? SelectedStopId { get; private set; }
 
-    /// <summary>True if the user used the "Ferma monitoraggio" button while this dialog was open —
-    /// the caller should stop monitoring in the main window too, not just switch this map to browse-mode.</summary>
-    public bool MonitoringWasStopped { get; private set; }
+    /// <summary>Raised as soon as the user presses "Ferma monitoraggio" inside this (still open, modal)
+    /// dialog — WPF's modal ShowDialog only pumps a nested message loop on the same UI thread, so the
+    /// owner window can react to this immediately instead of waiting for the dialog to close.</summary>
+    public event EventHandler? MonitoringStopped;
+
+    /// <summary>Raised as soon as the user changes the line filter from the map header (same modal
+    /// caveat as <see cref="MonitoringStopped"/> applies).</summary>
+    public event EventHandler<LineFilterChangedEventArgs>? LineFilterChanged;
+
+    public sealed class LineFilterChangedEventArgs(bool enabled, IReadOnlyList<string> selectedLines) : EventArgs
+    {
+        public bool Enabled { get; } = enabled;
+        public IReadOnlyList<string> SelectedLines { get; } = selectedLines;
+    }
 
     /// <param name="monitoredStopId">
-    /// Null: browse-mode, shows stops near the current location and lets the user pick one.
+    /// Null: browse-mode, shows stops near the current location (or <paramref name="initialCenterStopId"/>,
+    /// if given) and lets the user pick one.
     /// Non-null: monitor-mode, centers on this stop and overlays live bus positions, re-fetched from
     /// <paramref name="realtimeService"/> on every refresh so buses that have already passed the stop
     /// drop off the map instead of lingering with a stale ETA.
     /// </param>
+    /// <param name="initialCenterStopId">
+    /// Browse-mode only: a known stop to center the map on initially instead of the user's current
+    /// location (e.g. a stop code already typed into the main window). Ignored in monitor-mode.
+    /// </param>
+    /// <param name="availableLines">Monitor-mode only: the lines known so far for the monitored stop,
+    /// used to seed the line-filter checkboxes (more are added as they're seen in the live feed).</param>
+    /// <param name="lineFilterEnabled">Monitor-mode only: the main window's current "Filtra per linea" state.</param>
+    /// <param name="selectedLines">Monitor-mode only: the main window's currently selected lines.</param>
     public MapWindow(GtfsStaticData staticData, GtfsRealtimeService? realtimeService,
-        VehiclePositionsService? vehiclePositions, string? monitoredStopId)
+        VehiclePositionsService? vehiclePositions, string? monitoredStopId, string? initialCenterStopId = null,
+        IReadOnlyList<string>? availableLines = null, bool lineFilterEnabled = false, IReadOnlyList<string>? selectedLines = null)
     {
         InitializeComponent();
 
@@ -47,14 +76,66 @@ public partial class MapWindow : Window
         _realtimeService = realtimeService;
         _vehiclePositions = vehiclePositions;
         _monitoredStopId = monitoredStopId;
+        _initialCenterStopId = initialCenterStopId;
+        _lineFilterSelectedLines = selectedLines is null ? new HashSet<string>() : new HashSet<string>(selectedLines);
 
         if (_monitoredStopId is not null)
         {
             _busRefreshTimer = new DispatcherTimer { Interval = BusRefreshInterval };
             _busRefreshTimer.Tick += async (_, _) => await RefreshBusPositionsAsync();
+
+            LineFilterRow.Visibility = Visibility.Visible;
+            LineFilterCheckBox.IsChecked = lineFilterEnabled;
+            foreach (var line in (availableLines ?? Array.Empty<string>()).OrderBy(l => l, StringComparer.OrdinalIgnoreCase))
+                AddLineFilterCheckBox(line);
+            UpdateLineFilterEnabledState();
         }
 
         Loaded += MapWindow_Loaded;
+    }
+
+    private void AddLineFilterCheckBox(string line)
+    {
+        if (!_knownLines.Add(line)) return;
+
+        var checkBox = new System.Windows.Controls.CheckBox
+        {
+            Content = line,
+            Tag = line,
+            Margin = new Thickness(0, 0, 10, 0),
+            IsChecked = _lineFilterSelectedLines.Contains(line),
+        };
+        checkBox.Checked += LineFilterLineCheckBox_Changed;
+        checkBox.Unchecked += LineFilterLineCheckBox_Changed;
+        LineFilterPanel.Children.Add(checkBox);
+    }
+
+    private void LineFilterCheckBox_Changed(object sender, RoutedEventArgs e) => NotifyLineFilterChangedAndRefresh();
+
+    private void LineFilterLineCheckBox_Changed(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.CheckBox { Tag: string line } checkBox) return;
+
+        if (checkBox.IsChecked == true) _lineFilterSelectedLines.Add(line);
+        else _lineFilterSelectedLines.Remove(line);
+        UpdateLineFilterEnabledState();
+        NotifyLineFilterChangedAndRefresh();
+    }
+
+    /// <summary>The filter only ever does anything with at least one line selected, so keep the master
+    /// checkbox disabled (and forcibly unchecked) whenever the selection is empty, rather than letting it
+    /// sit checked-but-inert.</summary>
+    private void UpdateLineFilterEnabledState()
+    {
+        var hasSelection = _lineFilterSelectedLines.Count > 0;
+        LineFilterCheckBox.IsEnabled = hasSelection;
+        if (!hasSelection) LineFilterCheckBox.IsChecked = false;
+    }
+
+    private void NotifyLineFilterChangedAndRefresh()
+    {
+        LineFilterChanged?.Invoke(this, new LineFilterChangedEventArgs(LineFilterCheckBox.IsChecked == true, _lineFilterSelectedLines.ToList()));
+        if (_monitoredStopId is not null) _ = RefreshBusPositionsAsync();
     }
 
     private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
@@ -68,11 +149,17 @@ public partial class MapWindow : Window
         {
             _busRefreshTimer?.Stop();
             _monitoredStopId = null;
-            MonitoringWasStopped = true;
+            MonitoringStopped?.Invoke(this, EventArgs.Empty);
             BusStatusList.ItemsSource = Array.Empty<string>();
 
             await ExecuteScriptAsync("clearBusMarkers(); clearStopMarkers();");
             StopMonitoringButton.Visibility = Visibility.Collapsed;
+            LineFilterRow.Visibility = Visibility.Collapsed;
+            LineFilterPanel.Children.Clear();
+            _knownLines.Clear();
+            _lineFilterSelectedLines.Clear();
+            LineFilterCheckBox.IsChecked = false;
+            LineFilterCheckBox.IsEnabled = false;
 
             await ShowNearbyStopsAsync();
         }
@@ -119,7 +206,7 @@ public partial class MapWindow : Window
             }
             else
             {
-                await ShowNearbyStopsAsync();
+                await ShowNearbyStopsAsync(_initialCenterStopId);
             }
         }
         catch (Exception ex)
@@ -134,8 +221,19 @@ public partial class MapWindow : Window
     private static readonly (double Lat, double Lon) RomeCenter = (41.9028, 12.4964);
     private const double MaxDistanceFromRomeCenterKm = 50;
 
-    private async Task ShowNearbyStopsAsync()
+    private async Task ShowNearbyStopsAsync(string? centerStopId = null)
     {
+        if (centerStopId is not null && _staticData.TryGetStopLocation(centerStopId, out var stopLat, out var stopLon))
+        {
+            InstructionTextBlock.Text =
+                "Fermate vicino al codice inserito: clicca su una fermata per selezionarla, oppure sposta o zooma la mappa per cercarne altre.";
+
+            await ExecuteScriptAsync($"initMap({Fmt(stopLat)}, {Fmt(stopLon)}, 16);");
+            await ExecuteScriptAsync("enableViewportStopSearch();");
+            await ExecuteScriptAsync("notifyViewportChanged();"); // triggers the first stop search, via the same path as pan/zoom
+            return;
+        }
+
         var location = await GetCurrentLocationAsync();
         if (location is not null && DistanceKm(location.Value.Lat, location.Value.Lon, RomeCenter.Lat, RomeCenter.Lon) > MaxDistanceFromRomeCenterKm)
         {
@@ -240,13 +338,24 @@ public partial class MapWindow : Window
             // Trips still listed for this stop haven't passed it yet, however late they're running.
             var stillApproaching = freshArrivals.Select(a => a.TripId).ToHashSet();
             foreach (var arrival in freshArrivals)
+            {
                 _recentArrivalsByTripId[arrival.TripId] = arrival;
+                if (!_knownLines.Contains(arrival.RouteLabel)) AddLineFilterCheckBox(arrival.RouteLabel);
+            }
 
             var cutoff = DateTime.Now.AddMinutes(-RecentlyPassedLookbackMinutes);
             foreach (var tripId in _recentArrivalsByTripId.Where(kv => kv.Value.ArrivalTime < cutoff).Select(kv => kv.Key).ToList())
                 _recentArrivalsByTripId.Remove(tripId);
 
-            if (_recentArrivalsByTripId.Count == 0)
+            // Mirrors the main window's own "Filtra per linea": applied to what's shown here, without
+            // discarding tracked arrivals for other lines from _recentArrivalsByTripId, so toggling the
+            // filter takes effect immediately instead of waiting for the recently-passed lookback window.
+            var filterActive = LineFilterCheckBox.IsChecked == true && _lineFilterSelectedLines.Count > 0;
+            var filteredTripIds = (filterActive
+                ? _recentArrivalsByTripId.Where(kv => _lineFilterSelectedLines.Contains(kv.Value.RouteLabel))
+                : _recentArrivalsByTripId).Select(kv => kv.Key).ToHashSet();
+
+            if (filteredTripIds.Count == 0)
             {
                 await ExecuteScriptAsync("clearBusMarkers();");
                 BusStatusList.ItemsSource = Array.Empty<string>();
@@ -254,7 +363,7 @@ public partial class MapWindow : Window
             }
 
             var arrivalByTripId = _recentArrivalsByTripId;
-            var positions = await _vehiclePositions.GetPositionsForTripsAsync(arrivalByTripId.Keys.ToHashSet());
+            var positions = await _vehiclePositions.GetPositionsForTripsAsync(filteredTripIds);
             if (_monitoredStopId != stopId) return;
 
             // For buses currently stopped, look up the realtime predicted departure from the stop
@@ -394,6 +503,13 @@ public partial class MapWindow : Window
           <div id="map"></div>
           <script>
             let map, stopMarkers = {}, busMarkers = {}, meMarker = null;
+            // Stop tooltips are shown via a Popup added directly to the map (not marker.setPopup(),
+            // to get hover instead of click-to-open), so removing the marker itself does not remove
+            // an open tooltip. Track them here so clearStopMarkers can close any that are still
+            // open, otherwise one left open while its marker is replaced (e.g. by a viewport
+            // refresh on moveend) never receives the 'mouseleave' that would normally close it, and
+            // lingers on the map with no way to dismiss it.
+            let stopTooltips = [];
             let viewportDebounceTimer = null;
             let viewportHandler = null;
 
@@ -410,19 +526,19 @@ public partial class MapWindow : Window
                 // no key, but only serves vector tiles, hence MapLibre GL JS instead of Leaflet.
                 map = new maplibregl.Map({
                   container: 'map',
-                  style: 'https://tiles.openfreemap.org/styles/bright',
+                  style: 'https://tiles.openfreemap.org/styles/liberty',
                   center: [lon, lat],
                   zoom: zoom,
                   attributionControl: { compact: true, customAttribution: '© OpenStreetMap contributors · © OpenFreeMap' }
                 });
-                map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
+                map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-left');
 
-                // The "bright" style references a few POI icons (gate, office, swimming_pool, ...)
-                // that aren't in the sprite sheet it's paired with — cosmetic gaps upstream.
-                // setMissingStyleImageResolver is awaited *before* MapLibre treats the image as
-                // missing, so resolving it here (unlike handling 'styleimagemissing', which fires
-                // only after the "could not be loaded" warning is already logged) avoids the
-                // console warning entirely, not just the visual gap.
+                // The "liberty" style (like "bright" before it) references a few POI icons (gate,
+                // office, swimming_pool, ...) that aren't in the sprite sheet it's paired with —
+                // cosmetic gaps upstream. setMissingStyleImageResolver is awaited *before* MapLibre
+                // treats the image as missing, so resolving it here (unlike handling
+                // 'styleimagemissing', which fires only after the "could not be loaded" warning is
+                // already logged) avoids the console warning entirely, not just the visual gap.
                 map.setMissingStyleImageResolver((id) => {
                   if (map.hasImage(id)) return;
                   map.addImage(id, { width: 1, height: 1, data: new Uint8Array([0, 0, 0, 0]) });
@@ -459,6 +575,7 @@ public partial class MapWindow : Window
               // Leaflet's bindTooltip showed the label on hover (not click); replicate that with a
               // popup toggled on mouseenter/mouseleave instead of MapLibre's default click-to-open.
               const tooltip = new maplibregl.Popup({ offset: 14, closeButton: false, closeOnClick: false }).setHTML(label);
+              stopTooltips.push(tooltip);
               el.addEventListener('mouseenter', () => tooltip.setLngLat([lon, lat]).addTo(map));
               el.addEventListener('mouseleave', () => tooltip.remove());
               if (selectable) {
@@ -470,6 +587,8 @@ public partial class MapWindow : Window
             function clearStopMarkers() {
               for (const id in stopMarkers) stopMarkers[id].remove();
               stopMarkers = {};
+              for (const tooltip of stopTooltips) tooltip.remove(); // no-op for ones already closed
+              stopTooltips = [];
             }
 
             function addMeMarker(lat, lon) {

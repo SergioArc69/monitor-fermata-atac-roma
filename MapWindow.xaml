@@ -12,6 +12,7 @@
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
@@ -29,11 +30,22 @@
                     Margin="10,0,0,0" Padding="10,4" Visibility="Collapsed" Click="StopMonitoringButton_Click"/>
         </Grid>
 
-        <Border Grid.Row="1" BorderBrush="#FFCCCCCC" BorderThickness="1">
+        <Grid x:Name="LineFilterRow" Grid.Row="1" Margin="0,0,0,8" Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <CheckBox x:Name="LineFilterCheckBox" Grid.Column="0" Content="Filtra per linea" VerticalAlignment="Center"
+                      Margin="0,0,10,0" IsEnabled="False" Checked="LineFilterCheckBox_Changed" Unchecked="LineFilterCheckBox_Changed"/>
+            <WrapPanel x:Name="LineFilterPanel" Grid.Column="1" VerticalAlignment="Center"/>
+        </Grid>
+
+        <Border Grid.Row="2" BorderBrush="#FFCCCCCC" BorderThickness="1">
             <wv2:WebView2 x:Name="MapWebView"/>
         </Border>
 
-        <Grid Grid.Row="2" Margin="0,10,0,0">
+        <Grid Grid.Row="3" Margin="0,10,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>

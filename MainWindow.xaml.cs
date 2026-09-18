@@ -37,6 +37,7 @@ public partial class MainWindow : Window
     private readonly Forms.DateTimePicker _notifyToPicker = CreateTimePicker();
 
     private static readonly TimeSpan ScheduledFallbackCacheLifetime = TimeSpan.FromMinutes(3);
+    private const int MaxScheduledArrivalsPerLine = 10;
 
     private string? _monitoredStopId;
     private string? _lastNotifiedKey;
@@ -252,6 +253,8 @@ public partial class MainWindow : Window
         StartButton.IsEnabled = true;
         StopButton.IsEnabled = false;
         StopIdComboBox.IsEnabled = true;
+        Title = "Monitor Fermata ATAC Roma";
+        ApplyFilterAndDisplay();
         StatusTextBlock.Text = "Monitoraggio fermato.";
     }
 
@@ -292,18 +295,22 @@ public partial class MainWindow : Window
         }
 
         var dialog = _monitoredStopId is not null
-            ? new MapWindow(_staticData, _realtimeService, _vehiclePositionsService, _monitoredStopId)
-            : new MapWindow(_staticData, null, null, null);
+            ? new MapWindow(_staticData, _realtimeService, _vehiclePositionsService, _monitoredStopId,
+                availableLines: _availableLines.ToList(),
+                lineFilterEnabled: LineFilterCheckBox.IsChecked == true,
+                selectedLines: LineFilterListBox.SelectedItems.Cast<string>().ToList())
+            : new MapWindow(_staticData, null, null, null, StopIdComboBox.Text.Trim());
         dialog.Owner = this;
+
+        // Mirror "Ferma monitoraggio" from the map into the main window right away: ShowDialog only
+        // pumps a nested message loop on this same UI thread, it doesn't block it, so this handler runs
+        // (and the main window updates) while the map dialog is still open, not just after it closes.
+        dialog.MonitoringStopped += (_, _) => StopButton_Click(this, new RoutedEventArgs());
+        dialog.LineFilterChanged += (_, args) => ApplyLineFilterFromMap(args.Enabled, args.SelectedLines);
 
         var dialogResult = dialog.ShowDialog();
         if (dialogResult == true && dialog.SelectedStopId is not null)
             StopIdComboBox.Text = dialog.SelectedStopId;
-
-        // The user pressed "Ferma monitoraggio" inside the map dialog: mirror that in the main
-        // window too, not just in the (now closed) map view.
-        if (dialog.MonitoringWasStopped && _monitoredStopId is not null)
-            StopButton_Click(this, new RoutedEventArgs());
     }
 
     private void SettingsButton_Click(object sender, RoutedEventArgs e)
@@ -318,7 +325,38 @@ public partial class MainWindow : Window
 
     private void LineFilterCheckBox_Changed(object sender, RoutedEventArgs e) => ApplyFilterAndDisplay();
 
-    private void LineFilterListBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e) => ApplyFilterAndDisplay();
+    private void LineFilterListBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        UpdateLineFilterEnabledState();
+        ApplyFilterAndDisplay();
+    }
+
+    /// <summary>The filter only ever does anything with at least one line selected, so keep the master
+    /// checkbox disabled (and forcibly unchecked) whenever the selection is empty, rather than letting it
+    /// sit checked-but-inert.</summary>
+    private void UpdateLineFilterEnabledState()
+    {
+        var hasSelection = LineFilterListBox.SelectedItems.Count > 0;
+        LineFilterCheckBox.IsEnabled = hasSelection;
+        if (!hasSelection) LineFilterCheckBox.IsChecked = false;
+    }
+
+    /// <summary>Mirrors a line-filter edit made from the map's own header back into the main window
+    /// (see MapWindow.LineFilterChanged) — setting these properties re-triggers the Changed/SelectionChanged
+    /// handlers above, which call ApplyFilterAndDisplay() same as an edit made directly here would.</summary>
+    private void ApplyLineFilterFromMap(bool enabled, IReadOnlyList<string> selectedLines)
+    {
+        foreach (var line in selectedLines) AddAvailableLine(line);
+
+        LineFilterListBox.SelectedItems.Clear();
+        foreach (var line in selectedLines)
+            LineFilterListBox.SelectedItems.Add(line);
+
+        // Must come after populating the selection above: Clear() momentarily empties the list,
+        // and the SelectionChanged it fires calls UpdateLineFilterEnabledState(), which forces
+        // IsChecked back to false while empty — setting it before that point would just be undone.
+        if (selectedLines.Count > 0) LineFilterCheckBox.IsChecked = enabled;
+    }
 
     private void UpdateStopNameHint()
     {
@@ -410,13 +448,14 @@ public partial class MainWindow : Window
             _lastArrivals = await _realtimeService.GetArrivalsForStopAsync(_monitoredStopId);
 
             _lastArrivals = _lastArrivals.Count == 0
-                ? await GetScheduledFallbackAsync(_monitoredStopId)
+                ? await GetScheduledFallbackPerLineAsync(_monitoredStopId)
                 : await SupplementSparseLinesAsync(_monitoredStopId, _lastArrivals);
 
             foreach (var line in _lastArrivals.Select(a => a.RouteLabel).Distinct())
                 AddAvailableLine(line);
 
             ApplyPendingLineSelection();
+            UpdateLineFilterEnabledState();
             ApplyFilterAndDisplay();
         }
         catch (Exception ex)
@@ -430,6 +469,22 @@ public partial class MainWindow : Window
     /// are still frequent or about to thin out — pad it with the next couple of scheduled (non-live)
     /// arrivals for the same line, clearly marked as such via IsRealtime=false.
     /// </summary>
+    /// <summary>
+    /// Used when GTFS-RT has nothing at all for the stop. Unlike <see cref="SupplementSparseLinesAsync"/>,
+    /// which only tops up lines realtime already partially covers, here every line comes purely from the
+    /// static timetable — for a high-frequency line (e.g. a metro) that can mean dozens of runs before end
+    /// of service, so cap each line to the next few instead of dumping the whole day.
+    /// </summary>
+    private async Task<IReadOnlyList<ArrivalInfo>> GetScheduledFallbackPerLineAsync(string stopId)
+    {
+        var scheduled = await GetScheduledFallbackAsync(stopId);
+        return scheduled
+            .GroupBy(a => a.RouteLabel)
+            .SelectMany(g => g.OrderBy(a => a.ArrivalTime).Take(MaxScheduledArrivalsPerLine))
+            .OrderBy(a => a.ArrivalTime)
+            .ToList();
+    }
+
     private async Task<IReadOnlyList<ArrivalInfo>> SupplementSparseLinesAsync(string stopId, IReadOnlyList<ArrivalInfo> realtimeArrivals)
     {
         var sparseLines = realtimeArrivals
