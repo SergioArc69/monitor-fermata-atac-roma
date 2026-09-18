@@ -43,7 +43,7 @@ pwsh installer\build.ps1
 
 [Open data GTFS / GTFS-RT di Roma Mobilità](https://romamobilita.it/it/tecnologie/open-data/dataset) — nessuna API key richiesta. I dati di fermate e linee vengono aggiornati periodicamente in locale; gli orari di arrivo e le posizioni dei bus sono sempre in tempo reale.
 
-La mappa usa le tile di [OpenStreetMap](https://www.openstreetmap.org/copyright), © collaboratori di OpenStreetMap, distribuite con licenza [ODbL](https://opendatacommons.org/licenses/odbl/).
+La mappa usa le tile di [OpenFreeMap](https://openfreemap.org/), con dati cartografici © collaboratori di [OpenStreetMap](https://www.openstreetmap.org/copyright), distribuiti con licenza [ODbL](https://opendatacommons.org/licenses/odbl/).
 
 ## Licenza
 
